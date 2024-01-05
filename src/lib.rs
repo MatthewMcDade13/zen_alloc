@@ -3,7 +3,6 @@ mod test;
 
 use std::{
     alloc::{alloc, dealloc, Layout},
-    marker::PhantomData,
     mem::align_of,
     ops::{Deref, DerefMut},
 };
