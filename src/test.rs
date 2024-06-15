@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
-
-    use crate::{BumpAllocator, StackAllocator};
+    use crate::{bump::BumpAllocator, stack::StackAllocator};
 
     struct Point {
         x: f64,
