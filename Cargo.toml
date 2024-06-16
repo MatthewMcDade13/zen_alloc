@@ -14,3 +14,4 @@ keywords = ["allocators", "memory", "alloc", "dealloc"]
 
 [dependencies]
 anyhow = "1.0.79"
+bytemuck = { version = "1.16.0", features = ["bytemuck_derive", "derive", "const_zeroed", "min_const_generics"] }
