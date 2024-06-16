@@ -158,91 +158,49 @@ impl<const SIZE: usize> FixedBlockPool<SIZE> {
     }
 }
 
-pub struct SlabAllocator {
-    slab_b8: FixedBlockPool<8>,
-    slab_16: FixedBlockPool<16>,
-    slab_32: FixedBlockPool<32>,
-    slab_64: FixedBlockPool<64>,
-    slab_128: FixedBlockPool<128>,
-    slab_256: FixedBlockPool<256>,
-    slab_512: FixedBlockPool<512>,
-    slab_1024: FixedBlockPool<1024>,
-    slab_2048: FixedBlockPool<2048>,
+pub struct BlockPool {
+    first_avail: usize,
+    block_size: usize,
+    blocks: Vec<u8>,
 }
 
-// pub struct SizedMemPool<const SIZE: usize> {
-//     // block_size: usize,
-//     cap: usize,
-//     length: usize,
-//     // buf: *mut u8,
-//     buf: Box<[Block<SIZE>]>, // layout: Layout,
-// }
-//
-// impl<const SIZE: usize> SizedMemPool<SIZE> {
-//     pub const fn size(&self) -> usize {
-//         SIZE * self.buf.len()
-//         // self.block_size * self.length
-//     }
-//
-//     const DEFAULT_CAP: usize = 2;
-//     pub fn new(block_size: usize) -> Self {
-//         Self::with_capacity(block_size, Self::DEFAULT_CAP)
-//     }
-//
-//     pub fn with_capacity(block_size: usize, capacity: usize) -> Self {
-//         Self {
-//             cap: capacity,
-//             length: 0,
-//             buf: Box::new([0; capacity]),
-//         }
-// const ALIGN: usize = std::mem::align_of::<u8>();
-// let alloc_size = block_size * capacity;
-//
-// if let Some(layout) = Layout::from_size_align(alloc_size, ALIGN).ok() {
-//     unsafe {
-//         let buf = alloc(layout);
-//         if buf.is_null() {
-//             panic!("MemPool::with_capacity => Out of Memory")
-//         }
-//         // let buf = NonNull::new_unchecked(buf);
-//
-//         Self {
-//             cap: capacity,
-//             length: 0,
-//             layout,
-//             buf,
-//         }
-//     }
-// } else {
-//     panic!(
-//         "MemPool::new() => Layout incorrect for cell_size: {}",
-//         block_size
-//     )
-// }
-// }
+impl BlockPool {
+    pub fn new(block_size: usize) -> Self {
+        // let blocks = vec![0; block_size * 2];
+        let blocks = Vec::new();
+        Self {
+            first_avail: 0,
+            block_size,
+            blocks,
+        }
+    }
 
-// pub fn get<T>(&mut self, handle: &PoolHandle<T>) -> *const T {
-//     unsafe {
-//         let ptr = self.buf;
-//
-//         let ptr = ptr.add(handle.index * self.block_size);
-//         let offset = ptr.align_offset(align_of::<T>());
-//         let ptr = ptr.add(offset).cast::<T>();
-//         ptr
-//     }
-// }
-// }
+    fn t<T: Sized>(&mut self, mut data: T) {
+        let s = self.index_slice_mut(0);
+        let ptr = s.as_mut_ptr();
+        let ptr = ptr.cast::<T>();
+        unsafe { std::ptr::write(ptr, data) }
+    }
 
-// pub struct PoolHandle<'alloc, T, Alloc = MemPool> {
-//     index: usize,
-//     alloc: &'alloc Alloc,
-//     _phantom: PhantomData<&'alloc T>,
-// }
-//
-// impl<'alloc, T, Alloc> Deref for PoolHandle<'alloc, T, Alloc> {
-//     type Target = T;
-//
-//     fn deref(&self) -> &Self::Target {}
-// }
-//
-// pub struct SlabAllocator {}
+    // pub fn alloc(&)
+
+    pub fn index_slice(&self, index: usize) -> &[u8] {
+        let stride = index * self.block_size;
+        let end = stride + self.block_size;
+        &self.blocks[stride..end]
+    }
+
+    pub fn index_slice_mut(&mut self, index: usize) -> &mut [u8] {
+        let stride = index * self.block_size;
+        let end = stride + self.block_size;
+        &mut self.blocks[stride..end]
+    }
+
+    // pub fn alloc<T>(&mut self, data: T) {}
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BlockDesc {
+    size_bytes: usize,
+    id: usize,
+}
