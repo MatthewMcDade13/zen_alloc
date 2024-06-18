@@ -1,3 +1,5 @@
+#![feature(non_null_convenience)]
+
 pub mod bump;
 pub mod mem;
 pub mod pool;
