@@ -1,7 +1,12 @@
 #[cfg(test)]
 mod tests {
-    use crate::{bump::BumpAllocator, stack::StackAllocator};
+    use crate::{
+        bump::BumpAllocator,
+        mem::{BlockVec, RawRef},
+        stack::StackAllocator,
+    };
 
+    #[repr(C)]
     struct Point {
         x: f64,
         y: f64,
@@ -49,6 +54,25 @@ mod tests {
         const S: &'static str = "aye lmao";
         let x = ba.alloc(String::from(S))?;
         assert_eq!(*x, S);
+
+        Ok(())
+    }
+
+    // TODO :: Debug this, something isnt writing/reading memory correctly...
+    #[test]
+    fn block_vec() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(512, 40);
+
+        let p = bv.alloc(Point { x: 56., y: 69. });
+        let x = bv.alloc(4).into_scoped();
+        let y = bv.alloc(usize::MAX).into_scoped();
+
+        // let inner = RawRef::deref(p);
+
+        assert_eq!(p.x, 56.);
+        assert_eq!(p.y, 69.);
+        assert_eq!(**x, 4);
+        assert_eq!(**y, usize::MAX);
 
         Ok(())
     }
