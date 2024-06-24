@@ -7,6 +7,7 @@ mod tests {
     };
 
     #[repr(C)]
+    #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Point {
         x: f64,
         y: f64,

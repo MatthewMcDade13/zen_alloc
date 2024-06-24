@@ -3,6 +3,7 @@ use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
     cell::Cell,
     marker::PhantomData,
+    mem::align_of,
     ops::{Deref, DerefMut, Index, IndexMut},
     ptr::NonNull,
 };
@@ -72,7 +73,10 @@ impl BlockVec {
     // TODO :: Refactor this to return an Option/Result<RawRef<T>>
     // ideally, the owner of this struct will allocate manually with self::resize,
     // and if for some reason we can't allocate because we are full, then return None/Err
-    pub fn alloc<T>(&self, v: T) -> RawRef<T> {
+    pub fn alloc<T>(&self, v: T) -> RawRef<T>
+    where
+        T: bytemuck::Pod,
+    {
         let first_avail = if self.first_avail.get() > self.len() {
             let next = self.len();
             self.resize(self.len() * 2);
@@ -111,10 +115,13 @@ impl BlockVec {
 
         unsafe {
             let ptr = self.as_ptr().add(byte_offset);
+            let offset = ptr.align_offset(align_of::<BlockHeader>());
+            let ptr = ptr.add(offset).cast::<BlockHeader>();
 
-            let ptr = ptr.cast::<BlockHeader>();
             let header = std::ptr::read(ptr);
-            let ptr = ptr.add(1).cast::<u8>();
+            let ptr = ptr.add(1);
+            let offset = ptr.align_offset(align_of::<u8>());
+            let ptr = ptr.add(offset).cast::<u8>();
 
             let block_size = self.block_size;
             BlockView {
@@ -140,7 +147,7 @@ impl BlockVec {
             let ptr = self.as_ptr().add(byte_offset);
 
             let ptr = ptr.cast::<BlockHeader>();
-            let mut header = ptr;
+            let header = ptr;
             let ptr = ptr.add(1).cast::<u8>();
 
             let block_size = self.block_size;
@@ -484,9 +491,15 @@ impl<'a> BlockView<'a> {
         unsafe { self.ptr.cast::<T>().as_mut() }
     }
 
-    pub fn write<T>(&self, v: T) {
-        let inner = self.cast_mut::<T>();
-        *inner = v;
+    pub fn write<T>(&self, v: T)
+    where
+        T: bytemuck::Pod,
+    {
+        let block = self.slice_mut();
+        let val = bytemuck::bytes_of(&v);
+        self::copy(block, val);
+        // let inner = self.cast_mut::<T>();
+        // *inner = v;
     }
 
     pub fn clear_zero(&self) {
@@ -518,4 +531,44 @@ impl Drop for BlockVec {
     fn drop(&mut self) {
         unsafe { dealloc(self.as_ptr(), self.layout()) }
     }
+}
+
+#[inline]
+pub fn index<T>(ptr: *const u8, mem_len: usize, index: usize, stride: usize) -> Option<*const T> {
+    let byte_offset = index * stride;
+    if byte_offset >= mem_len {
+        None
+    } else {
+        let ptr = unsafe {
+            let ptr = ptr.add(byte_offset);
+            let offset = ptr.align_offset(align_of::<T>());
+            ptr.add(offset).cast::<T>()
+        };
+
+        Some(ptr)
+    }
+}
+
+#[inline]
+pub fn index_read<T>(ptr: *const u8, mem_len: usize, index: usize, stride: usize) -> Option<T> {
+    let ptr = self::index::<T>(ptr, mem_len, index, stride)?;
+    unsafe { Some(std::ptr::read(ptr)) }
+}
+
+#[inline]
+pub fn index_write<T>(ptr: *const u8, mem_len: usize, index: usize, stride: usize, val: T) {
+    let ptr = self::index::<T>(ptr, mem_len, index, stride).unwrap() as *mut T;
+    unsafe { std::ptr::write(ptr, val) }
+}
+
+pub const unsafe fn offset_by<T>(mem: *const u8) -> *const u8 {
+    let byte_offset = std::mem::size_of::<T>();
+    let ptr = mem.add(byte_offset);
+    // let offset = mem.align_offset(align_of::<T>());
+    // let ptr = mem.add(offset).cast::<T>();
+    // let ptr = ptr.add(1);
+    //
+    // let offset = ptr.align_offset(align_of::<u8>());
+    // let ptr = ptr.add(offset).cast::<u8>();
+    ptr
 }
