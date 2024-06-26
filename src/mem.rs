@@ -28,7 +28,7 @@ impl Clone for BlockVec {
 }
 
 impl BlockVec {
-    pub fn new(block_size: usize) -> Self {
+    pub const fn new(block_size: usize) -> Self {
         Self {
             block_size,
             isinit: Cell::new(false),
@@ -40,28 +40,34 @@ impl BlockVec {
     }
 
     pub fn with_capacity(block_size: usize, capacity: usize) -> Self {
-        let mut s = Self::new(block_size);
-        *s.isinit.get_mut() = true;
+        let s = Self::new(block_size);
+        s.isinit.set(true);
         s.resize(capacity);
         s
     }
 
-    pub fn get<T>(&self, id: usize) -> &T {
-        self.view(id).to_ref()
+    pub fn get<T>(&self, id: usize) -> &T
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        self.view(id).cast_into()
     }
 
-    pub fn free<T>(&self, bh: RawRef<T>) {
+    pub fn free<T>(&self, bh: RawRef<T>)
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
         let first = self.first_avail.get();
 
         let next = {
-            let view_mut = self.view_mut_header(bh.header.id);
+            let mut view = self.view(bh.header.id);
 
-            let next = view_mut.header.next;
-            view_mut.header.alive = false;
+            let next = view.header.next;
+            // view_mut.header.alive = false;
+            view.header.alive = BlockHeader::DEAD;
 
-            view_mut.header.next = first;
+            view.header.next = first;
 
-            let view = view_mut.done();
             view.drop_inner::<T>();
             view.clear_zero();
             next
@@ -88,12 +94,13 @@ impl BlockVec {
         };
 
         let header = {
-            let view_mut = self.view_mut_header(first_avail);
-            view_mut.header.alive = true;
+            let mut view = self.view(first_avail);
+            // view_mut.header.alive = true;
+            view.header.alive = BlockHeader::ALIVE;
 
-            let view = view_mut.done();
+            let h = *view.header;
             view.write(v);
-            view.header
+            h
         };
 
         RawRef {
@@ -110,67 +117,74 @@ impl BlockVec {
             byte_offset < self.nbytes(),
             "Index out of range: BlockVec[{}]. len: {}",
             index,
-            self.len.get()
+            self.len()
         );
 
         unsafe {
             let ptr = self.as_ptr().add(byte_offset);
             let offset = ptr.align_offset(align_of::<BlockHeader>());
-            let ptr = ptr.add(offset).cast::<BlockHeader>();
+            let mut ptr = ptr.add(offset).cast::<BlockHeader>();
 
-            let header = std::ptr::read(ptr);
-            let ptr = ptr.add(1);
-            let offset = ptr.align_offset(align_of::<u8>());
-            let ptr = ptr.add(offset).cast::<u8>();
-
-            let block_size = self.block_size;
-            BlockView {
-                ptr: NonNull::new(ptr).unwrap(),
-                header,
-                block_size,
-                _phantom: PhantomData,
-            }
-        }
-    }
-
-    fn view_mut_header(&self, index: usize) -> BlockViewMut {
-        let byte_offset = index * self.block_size_full();
-
-        assert!(
-            byte_offset < self.nbytes(),
-            "Index out of range: BlockVec[{}]. len: {}",
-            index,
-            self.nbytes()
-        );
-
-        unsafe {
-            let ptr = self.as_ptr().add(byte_offset);
-
-            let ptr = ptr.cast::<BlockHeader>();
-            let header = ptr;
+            let header = ptr.as_mut();
             let ptr = ptr.add(1).cast::<u8>();
+            let offset = ptr.align_offset(align_of::<u8>());
+            let ptr = ptr.add(offset);
 
-            let block_size = self.block_size;
-
-            BlockViewMut {
-                header: header.as_mut().expect("Null ptr deref!!!"),
-                block_size,
-                ptr: NonNull::new(ptr).unwrap(),
+            let mem = slice::from_raw_parts_mut(ptr.as_ptr(), self.block_size);
+            BlockView {
+                mem,
+                header,
                 _phantom: PhantomData,
             }
         }
     }
+    //
+    // fn view_mut_header(&self, index: usize) -> BlockViewMut {
+    //     let byte_offset = index * self.block_size_full();
+    //
+    //     assert!(
+    //         byte_offset < self.nbytes(),
+    //         "Index out of range: BlockVec[{}]. len: {}",
+    //         index,
+    //         self.nbytes()
+    //     );
+    //
+    //     unsafe {
+    //         let ptr = self.as_ptr().add(byte_offset);
+    //
+    //         let ptr = ptr.cast::<BlockHeader>();
+    //         let header = ptr;
+    //         let ptr = ptr.add(1).cast::<u8>();
+    //         let offset = ptr.align_offset(align_of::<usize>());
+    //         let ptr = ptr.add(offset);
+    //
+    //         let block_size = self.block_size;
+    //         let mem = unsafe { slice::from_raw_parts_mut(ptr, block_size) };
+    //
+    //         BlockViewMut {
+    //             header: header.as_mut().expect("Null ptr deref!!!"),
+    //             block_size,
+    //             mem,
+    //             _phantom: PhantomData,
+    //         }
+    //     }
+    // }
 
-    fn as_ptr(&self) -> *mut u8 {
+    fn as_ptr(&self) -> NonNull<u8> {
+        let p = self.buf.get();
+        NonNull::new(p).expect("Memory pointed to by BlockView is null!!!")
+    }
+
+    fn raw(&self) -> *mut u8 {
         self.buf.get()
     }
 
     pub fn bytes(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.as_ptr(), self.nbytes()) }
+        unsafe { slice::from_raw_parts(self.raw(), self.nbytes()) }
     }
 
     pub fn bytes_mut(&mut self) -> &mut [u8] {
-        unsafe { slice::from_raw_parts_mut(self.as_ptr(), self.nbytes()) }
+        unsafe { slice::from_raw_parts_mut(self.raw(), self.nbytes()) }
     }
 
     pub const fn block_size(&self) -> usize {
@@ -218,11 +232,12 @@ impl BlockVec {
             self.grow(new_len);
 
             for i in old_len..new_len {
-                let v = self.view_mut_header(i);
+                let v = self.view(i);
                 *v.header = BlockHeader {
                     id: i,
                     next: i + 1,
-                    alive: false,
+                    alive: BlockHeader::DEAD,
+                    ..Default::default()
                 };
             }
         } else if new_size < self.len() {
@@ -267,7 +282,7 @@ impl BlockVec {
             let dst = unsafe { alloc_zeroed(layout_new) };
             let dst = NonNull::new(dst).expect("Out of memory!!!");
 
-            let bptr = self.as_ptr();
+            let bptr = self.raw();
             copy_raw(dst.as_ptr(), nbytes_new, bptr, nbytes_old);
 
             unsafe { dealloc(bptr, layout_old) };
@@ -276,108 +291,157 @@ impl BlockVec {
     }
 }
 
-impl Index<usize> for BlockVec {
-    type Output = [u8];
-
-    fn index(&self, index: usize) -> &Self::Output {
-        self.view(index).slice()
-    }
-}
-
-impl IndexMut<usize> for BlockVec {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        self.view(index).slice_mut()
-    }
-}
-
-impl<'a, T> Index<RawRef<'a, T>> for BlockVec {
+impl<'a, T> Index<RawRef<'a, T>> for BlockVec
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     type Output = T;
 
     fn index(&self, index: RawRef<'a, T>) -> &Self::Output {
-        self.view(index.header.id).to_ref()
+        self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<RawRef<'a, T>> for BlockVec {
+impl<'a, T> IndexMut<RawRef<'a, T>> for BlockVec
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     fn index_mut(&mut self, index: RawRef<'a, T>) -> &mut Self::Output {
-        self.view(index.header.id).to_mut()
+        self.view(index.header.id).cast_into_mut()
     }
 }
 
-impl<'a, T> Index<&RawRef<'a, T>> for BlockVec {
+impl<'a, T> Index<&RawRef<'a, T>> for BlockVec
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     type Output = T;
 
     fn index(&self, index: &RawRef<'a, T>) -> &Self::Output {
-        self.view(index.header.id).to_ref()
+        self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<&RawRef<'a, T>> for BlockVec {
+impl<'a, T> IndexMut<&RawRef<'a, T>> for BlockVec
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     fn index_mut(&mut self, index: &RawRef<'a, T>) -> &mut Self::Output {
-        self.view(index.header.id).to_mut()
+        self.view(index.header.id).cast_into_mut()
     }
 }
 
-impl<'a, T> Index<&mut RawRef<'a, T>> for BlockVec {
+impl<'a, T> Index<&mut RawRef<'a, T>> for BlockVec
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     type Output = T;
 
     fn index(&self, index: &mut RawRef<'a, T>) -> &Self::Output {
-        self.view(index.header.id).to_ref()
+        self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<&mut RawRef<'a, T>> for BlockVec {
+impl<'a, T> IndexMut<&mut RawRef<'a, T>> for BlockVec
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     fn index_mut(&mut self, index: &mut RawRef<'a, T>) -> &mut Self::Output {
-        self.view(index.header.id).to_mut()
+        self.view(index.header.id).cast_into_mut()
     }
 }
 
 #[derive(Debug)]
-pub struct Scoped<'alloc, T>(pub RawRef<'alloc, T>);
+pub struct Scoped<'alloc, T>(RawRef<'alloc, T>)
+where
+    T: bytemuck::Pod + bytemuck::Zeroable;
 
-impl<'a, T> Deref for Scoped<'a, T> {
-    type Target = RawRef<'a, T>;
-
-    fn deref(&self) -> &Self::Target {
+impl<'a, T> Scoped<'a, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
+    pub fn as_ref(&self) -> &RawRef<'a, T> {
         &self.0
     }
-}
 
-impl<'a, T> DerefMut for Scoped<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+    pub fn leak(&self) -> RawRef<'a, T> {
+        self.0
     }
 }
 
-impl<'a, T> Drop for Scoped<'a, T> {
+impl<'a, T> Deref for Scoped<'a, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
+    type Target = T; // RawRef<'a, T>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+impl<'a, T> DerefMut for Scoped<'a, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.deref_mut()
+    }
+}
+
+impl<'a, T> Drop for Scoped<'a, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     fn drop(&mut self) {
         let inner = RawRef::clone(&self.0);
         self.0.parent.free(inner);
     }
 }
 
-impl<'a, T> From<RawRef<'a, T>> for Scoped<'a, T> {
+impl<'a, T> From<RawRef<'a, T>> for Scoped<'a, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     fn from(value: RawRef<'a, T>) -> Self {
         Self(value)
     }
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BlockHeader {
     id: usize,
     next: usize,
-    alive: bool,
+    // cant use bool with bytemuck, so we use u16 to also provide the padding we want.
+    alive: u16,
+    _padding: u16,
+    _padding2: u32,
+}
+
+impl BlockHeader {
+    pub const ALIVE: u16 = 1;
+
+    // This blcok can be used for a new allocation.
+    pub const DEAD: u16 = 0;
+
+    /// True if self.alive is anything besides 0
+    pub const fn alive(&self) -> bool {
+        self.alive > 0
+    }
 }
 
 #[derive(Debug, Copy)]
-pub struct RawRef<'alloc, T> {
+pub struct RawRef<'alloc, T: bytemuck::Pod + bytemuck::Zeroable> {
     header: BlockHeader,
     parent: &'alloc BlockVec,
     _phantom: PhantomData<T>,
 }
 
-impl<'alloc, T> Clone for RawRef<'alloc, T> {
+impl<'alloc, T> Clone for RawRef<'alloc, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     fn clone(&self) -> Self {
         Self {
             header: self.header,
@@ -387,14 +451,17 @@ impl<'alloc, T> Clone for RawRef<'alloc, T> {
     }
 }
 
-impl<'alloc, T> RawRef<'alloc, T> {
+impl<'alloc, T> RawRef<'alloc, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     pub const fn id(&self) -> usize {
         self.header.id
     }
 
     pub fn is_alive(&self) -> bool {
         let view = self.parent.view(self.id());
-        view.header.alive
+        view.header.alive()
     }
 
     pub fn free(self) {
@@ -406,7 +473,10 @@ impl<'alloc, T> RawRef<'alloc, T> {
     }
 }
 
-impl<'alloc, T> Deref for RawRef<'alloc, T> {
+impl<'alloc, T> Deref for RawRef<'alloc, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -414,100 +484,139 @@ impl<'alloc, T> Deref for RawRef<'alloc, T> {
     }
 }
 
-impl<'alloc, T> DerefMut for RawRef<'alloc, T> {
+impl<'alloc, T> DerefMut for RawRef<'alloc, T>
+where
+    T: bytemuck::Pod + bytemuck::Zeroable,
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.parent.view(self.header.id).to_mut()
+        self.parent.view(self.header.id).cast_into_mut::<T>()
     }
 }
 
 /// A view into an allocated block of memory.
-#[derive(Debug, Clone, Copy)]
-struct BlockView<'alloc> {
-    header: BlockHeader,
-    block_size: usize,
-    ptr: NonNull<u8>,
-    _phantom: PhantomData<&'alloc BlockVec>,
-}
-
 #[derive(Debug)]
-struct BlockViewMut<'alloc> {
+struct BlockView<'alloc> {
     header: &'alloc mut BlockHeader,
-    block_size: usize,
-    ptr: NonNull<u8>,
+    mem: &'alloc mut [u8],
     _phantom: PhantomData<&'alloc BlockVec>,
-}
-
-impl<'a> BlockViewMut<'a> {
-    pub fn done(self) -> BlockView<'a> {
-        let Self {
-            header,
-            block_size,
-            ptr,
-            _phantom,
-        } = self;
-        let header = *header;
-        BlockView {
-            header,
-            block_size,
-            ptr,
-            _phantom,
-        }
-    }
 }
 
 impl<'a> BlockView<'a> {
     pub const fn alloc_size(&self) -> usize {
-        std::mem::size_of::<BlockHeader>() + self.block_size
-    }
-    pub const fn slice(&self) -> &'a [u8] {
-        unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.block_size) }
+        std::mem::size_of::<BlockHeader>() + self.block_size()
     }
 
-    pub fn slice_mut(&self) -> &'a mut [u8] {
-        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.block_size) }
+    pub const fn block_size(&self) -> usize {
+        self.mem.len()
     }
 
-    pub const fn inner_size(&self) -> usize {
-        self.block_size
+    pub fn cast_into<T>(self) -> &'a T
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        let size = std::mem::size_of::<T>();
+        let x: &'a [u8] = &self.mem[..size];
+        bytemuck::from_bytes::<T>(x)
     }
+
+    pub fn cast_into_mut<T>(self) -> &'a mut T
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        let size = std::mem::size_of::<T>();
+        let x: &'a mut [u8] = &mut self.mem[..size];
+        bytemuck::from_bytes_mut::<T>(x)
+    }
+
+    // pub fn cast_into<T>(self) -> BlockRef<'a, T>
+    // where
+    //     T: bytemuck::Pod + bytemuck::Zeroable,
+    // {
+    //     let size = std::mem::size_of::<T>();
+    //     let x: &'a [u8] = &self.mem[..size];
+    //     let val = bytemuck::from_bytes::<T>(x);
+    //     BlockRef {
+    //         header: *self.header,
+    //         block_size: self.block_size,
+    //         mem: val,
+    //         _phantom: PhantomData,
+    //     }
+    // }
+
+    // pub const fn slice(&'a self) -> &'a [u8] {
+    // self.mem
+    // unsafe { slice::from_raw_parts(self.mem.as_ptr(), self.block_size) }
+    // }
+
+    // pub fn slice_mut(&self) -> &'a mut [u8] {
+    // self.mem
+    // unsafe { slice::from_raw_parts_mut(self.mem.as_ptr(), self.block_size) }
+    // }
 
     // NOTE :: Lifetimes make these below conversion functions 'safe', but
     // any allocations made on the owning BlockVec will make all these
     // references invalid.
 
-    pub const fn to_ref<T>(self) -> &'a T {
-        unsafe { self.ptr.cast::<T>().as_ref() }
+    // pub const fn to_ref<T>(self) -> &'a T
+    // where
+    //     T: bytemuck::Pod + bytemuck::Zeroable,
+    // {
+    //     self.cast::<T>()
+    //     // let size = std::mem::size_of::<T>();
+    //     // bytemuck::from_bytes(&self.mem[..size])
+    //     // unsafe { self.mem.cast::<T>().as_ref() }
+    // }
+    //
+    // pub fn to_mut<T>(self) -> &'a mut T
+    // where
+    //     T: bytemuck::Pod + bytemuck::Zeroable,
+    // {
+    //     let s = { self.cast_mut::<T>() };
+    //     s
+    //     // let size = std::mem::size_of::<T>();
+    //     // bytemuck::from_bytes_mut(&mut self.mem[..size])
+    //     // unsafe { self.mem.cast::<T>().as_mut() }
+    // }
+
+    pub fn cast<T>(&'a self) -> &'a T
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        let size = std::mem::size_of::<T>();
+        let x: &'a [u8] = &self.mem[..size];
+        bytemuck::from_bytes(x)
+        // unsafe { self.mem.cast::<T>().as_ref() }
     }
 
-    pub fn to_mut<T>(self) -> &'a mut T {
-        unsafe { self.ptr.cast::<T>().as_mut() }
+    pub fn cast_mut<T>(&'a mut self) -> &'a mut T
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        let size = std::mem::size_of::<T>();
+        bytemuck::from_bytes_mut(&mut self.mem[..size])
+
+        // unsafe { self.mem.cast::<T>().as_mut() }
     }
 
-    pub const fn cast<T>(&self) -> &'a T {
-        unsafe { self.ptr.cast::<T>().as_ref() }
-    }
-
-    pub fn cast_mut<T>(&self) -> &'a mut T {
-        unsafe { self.ptr.cast::<T>().as_mut() }
-    }
-
-    pub fn write<T>(&self, v: T)
+    pub fn write<T>(&'a mut self, v: T)
     where
         T: bytemuck::Pod,
     {
-        let block = self.slice_mut();
         let val = bytemuck::bytes_of(&v);
-        self::copy(block, val);
+        self::copy(self.mem, val);
         // let inner = self.cast_mut::<T>();
         // *inner = v;
     }
 
-    pub fn clear_zero(&self) {
-        self.slice_mut().fill(0);
+    pub fn clear_zero(&'a mut self) {
+        self.mem.fill(0);
     }
 
-    pub fn drop_inner<T>(&self) {
-        let inner = self.to_ref::<T>();
+    pub fn drop_inner<T>(&'a self)
+    where
+        T: bytemuck::Pod + bytemuck::Zeroable,
+    {
+        let inner = self.cast::<T>();
         let _ = *inner;
     }
 }
@@ -529,7 +638,7 @@ pub fn copy(dst: &mut [u8], src: &[u8]) {
 
 impl Drop for BlockVec {
     fn drop(&mut self) {
-        unsafe { dealloc(self.as_ptr(), self.layout()) }
+        unsafe { dealloc(self.raw(), self.layout()) }
     }
 }
 

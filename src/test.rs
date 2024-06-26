@@ -72,8 +72,8 @@ mod tests {
 
         assert_eq!(p.x, 56.);
         assert_eq!(p.y, 69.);
-        assert_eq!(**x, 4);
-        assert_eq!(**y, usize::MAX);
+        assert_eq!(*x, 4);
+        assert_eq!(*y, usize::MAX);
 
         Ok(())
     }
