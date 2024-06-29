@@ -1,4 +1,4 @@
-use zen_alloc::mem::BlockVec;
+use zen_alloc::mem::{BlockVec, MemCell};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

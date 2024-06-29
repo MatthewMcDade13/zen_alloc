@@ -1,12 +1,37 @@
 use core::slice;
 use std::{
-    alloc::{alloc_zeroed, dealloc, Layout},
+    alloc::{alloc_zeroed, dealloc, realloc, Layout},
     cell::Cell,
     marker::PhantomData,
     mem::align_of,
     ops::{Deref, DerefMut, Index, IndexMut},
     ptr::NonNull,
 };
+
+pub trait MemCell: bytemuck::Pod + bytemuck::Zeroable {
+    fn init(self) -> Self {
+        self
+    }
+
+    fn delete(self) {}
+}
+
+// impl MemCell for () {}
+// impl MemCell for u8 {}
+// impl MemCell for i8 {}
+// impl MemCell for u16 {}
+// impl MemCell for i16 {}
+// impl MemCell for u32 {}
+// impl MemCell for i32 {}
+// impl MemCell for u64 {}
+// impl MemCell for i64 {}
+// impl MemCell for usize {}
+// impl MemCell for isize {}
+// impl MemCell for u128 {}
+// impl MemCell for i128 {}
+// impl MemCell for f32 {}
+// impl MemCell for f64 {}
+impl<T> MemCell for T where T: bytemuck::Pod + bytemuck::Zeroable {}
 
 #[derive(Debug)]
 pub struct BlockVec {
@@ -15,7 +40,7 @@ pub struct BlockVec {
     len: Cell<usize>,
     isinit: Cell<bool>,
 
-    buf: Cell<*mut u8>,
+    mem: Cell<*mut u8>,
     _phantom: PhantomData<[u8]>,
 }
 
@@ -34,14 +59,14 @@ impl BlockVec {
             isinit: Cell::new(false),
             len: Cell::new(0),
             first_avail: Cell::new(0),
-            buf: Cell::new(std::ptr::null_mut()),
+            mem: Cell::new(std::ptr::null_mut()),
             _phantom: PhantomData,
         }
     }
 
     pub fn with_capacity(block_size: usize, capacity: usize) -> Self {
         let s = Self::new(block_size);
-        s.isinit.set(true);
+        // s.isinit.set(true);
         s.resize(capacity);
         s
     }
@@ -55,9 +80,10 @@ impl BlockVec {
 
     pub fn free<T>(&self, bh: RawRef<T>)
     where
-        T: bytemuck::Pod + bytemuck::Zeroable,
+        T: MemCell,
     {
         let first = self.first_avail.get();
+        bh.delete();
 
         let next = {
             let mut view = self.view(bh.header.id);
@@ -68,7 +94,6 @@ impl BlockVec {
 
             view.header.next = first;
 
-            view.drop_inner::<T>();
             view.clear_zero();
             next
         };
@@ -81,7 +106,7 @@ impl BlockVec {
     // and if for some reason we can't allocate because we are full, then return None/Err
     pub fn alloc<T>(&self, v: T) -> RawRef<T>
     where
-        T: bytemuck::Pod,
+        T: MemCell,
     {
         let first_avail = if self.first_avail.get() > self.len() {
             let next = self.len();
@@ -99,7 +124,11 @@ impl BlockVec {
             view.header.alive = BlockHeader::ALIVE;
 
             let h = *view.header;
-            view.write(v);
+
+            let v = v.init();
+            // view.write_bytes(v);
+            unsafe { view.write_raw(v) };
+
             h
         };
 
@@ -122,8 +151,9 @@ impl BlockVec {
 
         unsafe {
             let ptr = self.as_ptr().add(byte_offset);
-            let offset = ptr.align_offset(align_of::<BlockHeader>());
-            let mut ptr = ptr.add(offset).cast::<BlockHeader>();
+
+            // let offset = ptr.align_offset(align_of::<BlockHeader>());
+            let mut ptr = ptr.cast::<BlockHeader>();
 
             let header = ptr.as_mut();
             let ptr = ptr.add(1).cast::<u8>();
@@ -171,12 +201,12 @@ impl BlockVec {
     // }
 
     fn as_ptr(&self) -> NonNull<u8> {
-        let p = self.buf.get();
+        let p = self.mem.get();
         NonNull::new(p).expect("Memory pointed to by BlockView is null!!!")
     }
 
     fn raw(&self) -> *mut u8 {
-        self.buf.get()
+        self.mem.get()
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -224,14 +254,18 @@ impl BlockVec {
     /// Allocates if new_size > self.len, otherwise self.len is decreased. (no need to
     /// allocated/deallocate if we dont need to on shrink )
     pub fn resize(&self, new_size: usize) {
+        if new_size == self.len() {
+            return;
+        }
         if new_size == 0 {
             self.len.set(0);
         } else if new_size > self.len() {
             let old_len = self.len();
-            let new_len = new_size + self.len();
-            self.grow(new_len);
+            let delta = new_size - old_len;
+            // let new_len = new_size + self.len();
+            self.grow(delta);
 
-            for i in old_len..new_len {
+            for i in old_len..new_size {
                 let v = self.view(i);
                 *v.header = BlockHeader {
                     id: i,
@@ -266,7 +300,7 @@ impl BlockVec {
                 panic!("Out of memory!!!")
             }
             // let ptr = NonNull::new(ptr).expect("Out of memory!!!");
-            self.buf.set(ptr);
+            self.mem.set(ptr);
             self.isinit.set(true);
         } else {
             let layout_old = self.layout();
@@ -286,7 +320,7 @@ impl BlockVec {
             copy_raw(dst.as_ptr(), nbytes_new, bptr, nbytes_old);
 
             unsafe { dealloc(bptr, layout_old) };
-            self.buf.set(dst.as_ptr());
+            self.mem.set(dst.as_ptr());
         }
     }
 }
@@ -354,11 +388,11 @@ where
 #[derive(Debug)]
 pub struct Scoped<'alloc, T>(RawRef<'alloc, T>)
 where
-    T: bytemuck::Pod + bytemuck::Zeroable;
+    T: MemCell;
 
 impl<'a, T> Scoped<'a, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     pub fn as_ref(&self) -> &RawRef<'a, T> {
         &self.0
@@ -371,7 +405,7 @@ where
 
 impl<'a, T> Deref for Scoped<'a, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     type Target = T; // RawRef<'a, T>;
 
@@ -382,7 +416,7 @@ where
 
 impl<'a, T> DerefMut for Scoped<'a, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
@@ -391,7 +425,7 @@ where
 
 impl<'a, T> Drop for Scoped<'a, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     fn drop(&mut self) {
         let inner = RawRef::clone(&self.0);
@@ -401,7 +435,7 @@ where
 
 impl<'a, T> From<RawRef<'a, T>> for Scoped<'a, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     fn from(value: RawRef<'a, T>) -> Self {
         Self(value)
@@ -432,7 +466,7 @@ impl BlockHeader {
 }
 
 #[derive(Debug, Copy)]
-pub struct RawRef<'alloc, T: bytemuck::Pod + bytemuck::Zeroable> {
+pub struct RawRef<'alloc, T: MemCell> {
     header: BlockHeader,
     parent: &'alloc BlockVec,
     _phantom: PhantomData<T>,
@@ -453,7 +487,7 @@ where
 
 impl<'alloc, T> RawRef<'alloc, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     pub const fn id(&self) -> usize {
         self.header.id
@@ -598,7 +632,7 @@ impl<'a> BlockView<'a> {
         // unsafe { self.mem.cast::<T>().as_mut() }
     }
 
-    pub fn write<T>(&'a mut self, v: T)
+    pub fn write_bytes<T>(&'a mut self, v: T)
     where
         T: bytemuck::Pod,
     {
@@ -608,16 +642,22 @@ impl<'a> BlockView<'a> {
         // *inner = v;
     }
 
-    pub fn clear_zero(&'a mut self) {
-        self.mem.fill(0);
+    pub unsafe fn write_raw<T>(&'a mut self, v: T)
+    where
+        T: MemCell,
+    {
+        let ptr = self.mem.as_mut_ptr();
+        let offset = ptr.align_offset(align_of::<T>());
+        let ptr = ptr.add(offset).cast::<T>();
+        std::ptr::write(ptr, v);
+
+        // let inner = self.cast_mut::<T>();
+        // *inner = v;
     }
 
-    pub fn drop_inner<T>(&'a self)
-    where
-        T: bytemuck::Pod + bytemuck::Zeroable,
-    {
-        let inner = self.cast::<T>();
-        let _ = *inner;
+    pub fn clear_zero(&'a mut self) {
+        bytemuck::fill_zeroes(self.mem);
+        // self.mem.fill(0);
     }
 }
 
@@ -651,7 +691,12 @@ pub fn index<T>(ptr: *const u8, mem_len: usize, index: usize, stride: usize) -> 
         let ptr = unsafe {
             let ptr = ptr.add(byte_offset);
             let offset = ptr.align_offset(align_of::<T>());
-            ptr.add(offset).cast::<T>()
+            let ptr = if offset < mem_len - 1 {
+                ptr.add(offset).cast::<T>()
+            } else {
+                return None;
+            };
+            ptr
         };
 
         Some(ptr)
