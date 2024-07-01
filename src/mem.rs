@@ -37,9 +37,10 @@ impl<T> MemCell for T where T: bytemuck::Pod + bytemuck::Zeroable {}
 pub struct BlockVec {
     first_avail: Cell<usize>,
     block_size: usize,
+    /// Number of Blocks currently allocated.
     len: Cell<usize>,
-    isinit: Cell<bool>,
-
+    /// Number of blocks that have been 'allocated' for use.
+    nactive: Cell<i32>,
     mem: Cell<*mut u8>,
     _phantom: PhantomData<[u8]>,
 }
@@ -56,8 +57,8 @@ impl BlockVec {
     pub const fn new(block_size: usize) -> Self {
         Self {
             block_size,
-            isinit: Cell::new(false),
             len: Cell::new(0),
+            nactive: Cell::new(0),
             first_avail: Cell::new(0),
             mem: Cell::new(std::ptr::null_mut()),
             _phantom: PhantomData,
@@ -69,6 +70,14 @@ impl BlockVec {
         // s.isinit.set(true);
         s.resize(capacity);
         s
+    }
+
+    pub fn nactive(&self) -> i32 {
+        self.nactive.get()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.nactive() >= self.len() as i32
     }
 
     pub fn get<T>(&self, id: usize) -> &T
@@ -84,6 +93,7 @@ impl BlockVec {
     {
         let first = self.first_avail.get();
         bh.delete();
+        self.nactive.set(self.nactive.get() - 1);
 
         let next = {
             let mut view = self.view(bh.header.id);
@@ -131,6 +141,8 @@ impl BlockVec {
 
             h
         };
+
+        self.nactive.set(self.nactive.get() + 1);
 
         RawRef {
             header,
@@ -285,7 +297,7 @@ impl BlockVec {
     }
 
     pub fn is_init(&self) -> bool {
-        self.isinit.get() && self.len() > 0
+        self.len() > 0
     }
 
     pub fn is_uninit(&self) -> bool {
@@ -301,7 +313,6 @@ impl BlockVec {
             }
             // let ptr = NonNull::new(ptr).expect("Out of memory!!!");
             self.mem.set(ptr);
-            self.isinit.set(true);
         } else {
             let layout_old = self.layout();
             let nbytes_old = self.nbytes();
