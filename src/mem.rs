@@ -93,7 +93,7 @@ impl BlockVec {
     pub fn free<'a, T, Ptr>(&'a self, bh: Ptr)
     where
         T: MemCell,
-        Ptr: Into<RawRef<'a, T>>,
+        Ptr: Into<BlockPtrRaw<'a, T>>,
     {
         let bh = bh.into();
         let first = self.first_avail.get();
@@ -119,7 +119,7 @@ impl BlockVec {
     // TODO :: Refactor this to return an Option/Result<RawRef<T>>
     // ideally, the owner of this struct will allocate manually with self::resize,
     // and if for some reason we can't allocate because we are full, then return None/Err
-    pub fn alloc<T: Sized>(&self, v: T) -> anyhow::Result<RawRef<T>>
+    pub fn alloc<T: Sized>(&self, v: T) -> anyhow::Result<BlockPtrRaw<T>>
     where
         T: MemCell,
     {
@@ -160,7 +160,7 @@ impl BlockVec {
 
         self.nactive.set(self.nactive.get() + 1);
 
-        let rr = RawRef {
+        let rr = BlockPtrRaw {
             header,
             parent: self,
             _phantom: PhantomData,
@@ -325,68 +325,68 @@ impl BlockVec {
     }
 }
 
-impl<'a, T> Index<RawRef<'a, T>> for BlockVec
+impl<'a, T> Index<BlockPtrRaw<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
     type Output = T;
 
-    fn index(&self, index: RawRef<'a, T>) -> &Self::Output {
+    fn index(&self, index: BlockPtrRaw<'a, T>) -> &Self::Output {
         self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<RawRef<'a, T>> for BlockVec
+impl<'a, T> IndexMut<BlockPtrRaw<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
-    fn index_mut(&mut self, index: RawRef<'a, T>) -> &mut Self::Output {
+    fn index_mut(&mut self, index: BlockPtrRaw<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
     }
 }
 
-impl<'a, T> Index<&RawRef<'a, T>> for BlockVec
+impl<'a, T> Index<&BlockPtrRaw<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
     type Output = T;
 
-    fn index(&self, index: &RawRef<'a, T>) -> &Self::Output {
+    fn index(&self, index: &BlockPtrRaw<'a, T>) -> &Self::Output {
         self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<&RawRef<'a, T>> for BlockVec
+impl<'a, T> IndexMut<&BlockPtrRaw<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
-    fn index_mut(&mut self, index: &RawRef<'a, T>) -> &mut Self::Output {
+    fn index_mut(&mut self, index: &BlockPtrRaw<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
     }
 }
 
-impl<'a, T> Index<&mut RawRef<'a, T>> for BlockVec
+impl<'a, T> Index<&mut BlockPtrRaw<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
     type Output = T;
 
-    fn index(&self, index: &mut RawRef<'a, T>) -> &Self::Output {
+    fn index(&self, index: &mut BlockPtrRaw<'a, T>) -> &Self::Output {
         self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<&mut RawRef<'a, T>> for BlockVec
+impl<'a, T> IndexMut<&mut BlockPtrRaw<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
-    fn index_mut(&mut self, index: &mut RawRef<'a, T>) -> &mut Self::Output {
+    fn index_mut(&mut self, index: &mut BlockPtrRaw<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
     }
 }
 
 #[derive(Debug)]
-pub struct Scoped<'alloc, T>(RawRef<'alloc, T>)
+pub struct Scoped<'alloc, T>(BlockPtrRaw<'alloc, T>)
 where
     T: MemCell;
 
@@ -394,11 +394,11 @@ impl<'a, T> Scoped<'a, T>
 where
     T: MemCell,
 {
-    pub fn as_ref(&self) -> &RawRef<'a, T> {
+    pub fn as_ref(&self) -> &BlockPtrRaw<'a, T> {
         &self.0
     }
 
-    pub fn leak(&self) -> RawRef<'a, T> {
+    pub fn leak(&self) -> BlockPtrRaw<'a, T> {
         self.0
     }
 }
@@ -428,16 +428,16 @@ where
     T: MemCell,
 {
     fn drop(&mut self) {
-        let inner = RawRef::clone(&self.0);
+        let inner = BlockPtrRaw::clone(&self.0);
         self.0.parent.free(inner);
     }
 }
 
-impl<'a, T> From<RawRef<'a, T>> for Scoped<'a, T>
+impl<'a, T> From<BlockPtrRaw<'a, T>> for Scoped<'a, T>
 where
     T: MemCell,
 {
-    fn from(value: RawRef<'a, T>) -> Self {
+    fn from(value: BlockPtrRaw<'a, T>) -> Self {
         Self(value)
     }
 }
@@ -466,13 +466,14 @@ impl BlockHeader {
 }
 
 #[derive(Debug, Copy)]
-pub struct RawRef<'alloc, T: MemCell> {
+
+pub struct BlockPtrRaw<'alloc, T: MemCell> {
     header: BlockHeader,
     parent: &'alloc BlockVec,
     _phantom: PhantomData<T>,
 }
 
-impl<'alloc, T> Clone for RawRef<'alloc, T>
+impl<'alloc, T> Clone for BlockPtrRaw<'alloc, T>
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
@@ -485,7 +486,7 @@ where
     }
 }
 
-impl<'alloc, T> RawRef<'alloc, T>
+impl<'alloc, T> BlockPtrRaw<'alloc, T>
 where
     T: MemCell,
 {
@@ -507,7 +508,7 @@ where
     }
 }
 
-impl<'alloc, T> Deref for RawRef<'alloc, T>
+impl<'alloc, T> Deref for BlockPtrRaw<'alloc, T>
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
@@ -518,7 +519,7 @@ where
     }
 }
 
-impl<'alloc, T> DerefMut for RawRef<'alloc, T>
+impl<'alloc, T> DerefMut for BlockPtrRaw<'alloc, T>
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {

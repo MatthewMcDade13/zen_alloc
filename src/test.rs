@@ -2,7 +2,7 @@
 mod tests {
     use crate::{
         bump::BumpAllocator,
-        mem::{BlockVec, MemCell, RawRef},
+        mem::{BlockPtrRaw, BlockVec, MemCell},
         stack::StackAllocator,
     };
 
@@ -67,7 +67,7 @@ mod tests {
         let x = bv.alloc(4)?.into_scoped();
         let y = bv.alloc(usize::MAX)?.into_scoped();
 
-        // let inner = RawRef::deref(p);
+        // let inner = BlockPtr::deref(p);
 
         assert_eq!(p.x, 56.);
         assert_eq!(p.y, 69.);
@@ -85,7 +85,7 @@ mod tests {
         let x = bv.alloc(4)?.into_scoped();
         let y = bv.alloc(usize::MAX)?.into_scoped();
 
-        // let inner = RawRef::deref(p);
+        // let inner = BlockPtr::deref(p);
 
         assert_eq!(p.x, 56.);
         assert_eq!(p.y, 69.);
@@ -103,7 +103,7 @@ mod tests {
         let x = bv.alloc(4)?.into_scoped();
         let y = bv.alloc(usize::MAX)?.into_scoped();
 
-        // let inner = RawRef::deref(p);
+        // let inner = BlockPtr::deref(p);
 
         assert_eq!(p.x, 56.);
         assert_eq!(p.y, 69.);
@@ -121,7 +121,7 @@ mod tests {
         let x = bv.alloc(4)?.into_scoped();
         let y = bv.alloc(usize::MAX)?.into_scoped();
 
-        // let inner = RawRef::deref(p);
+        // let inner = BlockPtr::deref(p);
 
         assert_eq!(p.x, 56.);
         assert_eq!(p.y, 69.);
@@ -139,7 +139,7 @@ mod tests {
         let x = bv.alloc(4)?.into_scoped();
         let y = bv.alloc(usize::MAX)?.into_scoped();
 
-        // let inner = RawRef::deref(p);
+        // let inner = BlockPtr::deref(p);
 
         assert_eq!(p.x, 56.);
         assert_eq!(p.y, 69.);
@@ -157,7 +157,7 @@ mod tests {
         let x = bv.alloc(4)?.into_scoped();
         let y = bv.alloc(usize::MAX)?.into_scoped();
 
-        // let inner = RawRef::deref(p);
+        // let inner = BlockPtr::deref(p);
 
         assert_eq!(p.x, 56.);
         assert_eq!(p.y, 69.);
@@ -196,7 +196,7 @@ mod tests {
         // let x = bv.alloc(4)?.into_scoped();
         // let y = bv.alloc(usize::MAX)?.into_scoped();
 
-        // let inner = RawRef::deref(p);
+        // let inner = BlockPtr::deref(p);
 
         // assert_eq!(p.x, 56.);
         // assert_eq!(p.y, 69.);

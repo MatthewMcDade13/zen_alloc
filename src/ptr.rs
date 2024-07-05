@@ -7,7 +7,22 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::slab;
+use crate::mem::{BlockPtrRaw, MemCell, Scoped};
+
+pub enum BlockPtr<'alloc, T>
+where
+    T: MemCell,
+{
+    Raw(BlockPtrRaw<'alloc, T>),
+    Scoped(Scoped<'alloc, T>),
+}
+
+pub enum ZenPtr<'alloc, T>
+where
+    T: MemCell,
+{
+    Block(BlockPtr<'alloc, T>),
+}
 
 // pub type Nil<T> = &'static T;
 const GLOBAL_NIL: usize = 80085101;
@@ -33,41 +48,6 @@ impl Nil {
     }
 }
 pub const NIL: Nil = Nil(&GLOBAL_NIL);
-
-#[derive(Debug)]
-pub struct Owned<T> {
-    ptr: *mut T,
-    _phantom: PhantomData<T>,
-}
-
-impl<T> Owned<T> {
-    const LAYOUT: Layout = Layout::new::<T>();
-
-    pub fn new(v: T) -> Self {
-        unsafe {
-            let ptr = alloc(Self::LAYOUT).cast::<T>();
-            std::ptr::write(ptr, v);
-
-            Self {
-                ptr,
-                _phantom: PhantomData,
-            }
-        }
-    }
-
-    pub unsafe fn from_raw(ptr: *mut T) -> Self {
-        Self {
-            ptr,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<T> Drop for Owned<T> {
-    fn drop(&mut self) {
-        unsafe { dealloc(self.ptr.cast::<u8>(), Self::LAYOUT) }
-    }
-}
 
 #[derive(Debug)]
 pub struct BasicPtr<T>
