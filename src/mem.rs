@@ -8,7 +8,8 @@ use std::{
     ptr::NonNull,
 };
 
-use anyhow::bail;
+use anyhow::{bail, ensure};
+use thiserror::Error;
 
 pub trait MemCell: bytemuck::Pod + bytemuck::Zeroable {
     fn init(self) -> Self {
@@ -122,34 +123,33 @@ impl BlockVec {
     where
         T: MemCell,
     {
-        if size_of::<T>() > self.block_size() {
-            bail!(
-                "BlockVec::alloc::<T>() => Given Type Size is greater than BlockVec block_size. type: {}, type_size: {:?}, block_size: {}",
-                std::any::type_name::<T>(),
-                size_of::<T>(),
-                self.block_size()
-            );
-        }
+        ensure!(
+            size_of::<T>() <= self.block_size(),
+            AllocError::TypeTooLarge {
+                type_name: std::any::type_name::<T>().into(),
+                type_size: size_of::<T>(),
+                block_size: self.block_size()
+            }
+        );
 
         let first_avail = if self.first_avail.get() > self.len() {
-            let next = self.len();
-            self.resize(self.len() * 2);
+            bail!(AllocError::Full);
+            // let next = self.len();
+            // self.resize(self.len() * 2);
 
-            self.first_avail.set(next);
-            next
+            // self.first_avail.set(next);
+            // next
         } else {
             self.first_avail.get()
         };
 
         let header = {
             let mut view = self.view(first_avail);
-            // view_mut.header.alive = true;
             view.header.alive = BlockHeader::ALIVE;
 
             let h = *view.header;
 
             let v = v.init();
-            // view.write_bytes(v);
             unsafe {
                 view.write_raw(v);
             };
@@ -197,37 +197,6 @@ impl BlockVec {
             }
         }
     }
-    //
-    // fn view_mut_header(&self, index: usize) -> BlockViewMut {
-    //     let byte_offset = index * self.block_size_full();
-    //
-    //     assert!(
-    //         byte_offset < self.nbytes(),
-    //         "Index out of range: BlockVec[{}]. len: {}",
-    //         index,
-    //         self.nbytes()
-    //     );
-    //
-    //     unsafe {
-    //         let ptr = self.as_ptr().add(byte_offset);
-    //
-    //         let ptr = ptr.cast::<BlockHeader>();
-    //         let header = ptr;
-    //         let ptr = ptr.add(1).cast::<u8>();
-    //         let offset = ptr.align_offset(align_of::<usize>());
-    //         let ptr = ptr.add(offset);
-    //
-    //         let block_size = self.block_size;
-    //         let mem = unsafe { slice::from_raw_parts_mut(ptr, block_size) };
-    //
-    //         BlockViewMut {
-    //             header: header.as_mut().expect("Null ptr deref!!!"),
-    //             block_size,
-    //             mem,
-    //             _phantom: PhantomData,
-    //         }
-    //     }
-    // }
 
     fn as_ptr(&self) -> NonNull<u8> {
         let p = self.mem.get();
@@ -313,7 +282,7 @@ impl BlockVec {
         self.len.set(nlen);
     }
 
-    pub fn shrink_free(&self, nblocks: usize) {}
+    // pub fn shrink_free(&self, nblocks: usize) {}
 
     pub fn is_init(&self) -> bool {
         self.len() > 0
@@ -720,4 +689,19 @@ pub fn realloc_(ptr: *mut u8, old_layout: Layout, new_layout: Layout) -> *mut u8
     unsafe { dealloc(ptr, old_layout) };
     dst.as_ptr()
     // self.mem.set(dst.as_ptr());
+}
+
+#[derive(Error, Debug)]
+pub enum AllocError {
+    #[error("Given Type Size is greater than BlockVec block_size. type: {type_name}, type_size: {type_size} block_size: {block_size}")]
+    TypeTooLarge {
+        type_name: String,
+        type_size: usize,
+        block_size: usize,
+    },
+
+    #[error("Allocated buffer is full. Resize (grow) to allocate more.")]
+    Full,
+    #[error("Operating System Out of Memory!!!")]
+    OutOfMemory,
 }
