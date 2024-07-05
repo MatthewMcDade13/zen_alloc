@@ -89,10 +89,12 @@ impl BlockVec {
         self.view(id).cast_into()
     }
 
-    pub fn free<T>(&self, bh: RawRef<T>)
+    pub fn free<'a, T, Ptr>(&'a self, bh: Ptr)
     where
         T: MemCell,
+        Ptr: Into<RawRef<'a, T>>,
     {
+        let bh = bh.into();
         let first = self.first_avail.get();
         bh.delete();
         self.nactive.set(self.nactive.get() - 1);
@@ -122,7 +124,8 @@ impl BlockVec {
     {
         if size_of::<T>() > self.block_size() {
             bail!(
-                "BlockVec::alloc::<T>() => Given Type Size is greater than BlockVec block_size. type_size: {:?}, block_size: {}",
+                "BlockVec::alloc::<T>() => Given Type Size is greater than BlockVec block_size. type: {}, type_size: {:?}, block_size: {}",
+                std::any::type_name::<T>(),
                 size_of::<T>(),
                 self.block_size()
             );
@@ -305,10 +308,12 @@ impl BlockVec {
         }
     }
 
-    fn shrink(&self, nblocks: usize) {
+    pub fn shrink(&self, nblocks: usize) {
         let nlen = self.len() - nblocks;
         self.len.set(nlen);
     }
+
+    pub fn shrink_free(&self, nblocks: usize) {}
 
     pub fn is_init(&self) -> bool {
         self.len() > 0
@@ -331,6 +336,7 @@ impl BlockVec {
             let layout_old = self.layout();
             let nbytes_old = self.nbytes();
 
+            assert!(layout_old.size() == nbytes_old);
             {
                 let n = self.len() + nblocks;
                 self.len.set(n);
@@ -481,7 +487,7 @@ struct BlockHeader {
 impl BlockHeader {
     pub const ALIVE: u16 = 1;
 
-    // This blcok can be used for a new allocation.
+    // This block can be used for a new allocation.
     pub const DEAD: u16 = 0;
 
     /// True if self.alive is anything besides 0
@@ -600,75 +606,24 @@ impl<'a> BlockView<'a> {
         bytemuck::from_bytes_mut::<T>(x)
     }
 
-    // pub fn cast_into<T>(self) -> BlockRef<'a, T>
-    // where
-    //     T: bytemuck::Pod + bytemuck::Zeroable,
-    // {
-    //     let size = std::mem::size_of::<T>();
-    //     let x: &'a [u8] = &self.mem[..size];
-    //
-    //     ?"let val = bytemuck::from_bytes::<T>(x);
-    //     BlockRef {
-    //         header: *self.header,
-    //         block_size: self.block_size,
-    //         mem: val,
-    //         _phantom: PhantomData,
-    //     }
-    // }
-
-    // pub const fn slice(&'a self) -> &'a [u8] {
-    // self.mem
-    // unsafe { slice::from_raw_parts(self.mem.as_ptr(), self.block_size) }
-    // }
-
-    // pub fn slice_mut(&self) -> &'a mut [u8] {
-    // self.mem
-    // unsafe { slice::from_raw_parts_mut(self.mem.as_ptr(), self.block_size) }
-    // }
-
     // NOTE :: Lifetimes make these below conversion functions 'safe', but
     // any allocations made on the owning BlockVec will make all these
     // references invalid.
-
-    // pub const fn to_ref<T>(self) -> &'a T
-    // where
-    //     T: bytemuck::Pod + bytemuck::Zeroable,
-    // {
-    //     self.cast::<T>()
-    //     // let size = std::mem::size_of::<T>();
-    //     // bytemuck::from_bytes(&self.mem[..size])
-    //     // unsafe { self.mem.cast::<T>().as_ref() }
-    // }
-    //
-    // pub fn to_mut<T>(self) -> &'a mut T
-    // where
-    //     T: bytemuck::Pod + bytemuck::Zeroable,
-    // {
-    //     let s = { self.cast_mut::<T>() };
-    //     s
-    //     // let size = std::mem::size_of::<T>();
-    //     // bytemuck::from_bytes_mut(&mut self.mem[..size])
-    //     // unsafe { self.mem.cast::<T>().as_mut() }
-    // }
 
     pub fn cast<T>(&'a self) -> &'a T
     where
         T: bytemuck::Pod + bytemuck::Zeroable,
     {
-        let size = std::mem::size_of::<T>();
-        let x: &'a [u8] = &self.mem[..size];
+        let x: &'a [u8] = type_slice!(self, T);
         bytemuck::from_bytes(x)
-        // unsafe { self.mem.cast::<T>().as_ref() }
     }
 
     pub fn cast_mut<T>(&'a mut self) -> &'a mut T
     where
         T: bytemuck::Pod + bytemuck::Zeroable,
     {
-        let size = std::mem::size_of::<T>();
-        bytemuck::from_bytes_mut(&mut self.mem[..size])
-
-        // unsafe { self.mem.cast::<T>().as_mut() }
+        let x: &'a mut [u8] = type_slice_mut!(self, T);
+        bytemuck::from_bytes_mut(x)
     }
 
     pub fn write_bytes<T>(&'a mut self, v: T)
@@ -689,14 +644,10 @@ impl<'a> BlockView<'a> {
         let offset = ptr.align_offset(align_of::<T>());
         let ptr = ptr.add(offset).cast::<T>();
         std::ptr::write(ptr, v);
-
-        // let inner = self.cast_mut::<T>();
-        // *inner = v;
     }
 
     pub fn clear_zero(&'a mut self) {
         bytemuck::fill_zeroes(self.mem);
-        // self.mem.fill(0);
     }
 }
 
@@ -757,11 +708,16 @@ pub fn index_write<T>(ptr: *const u8, mem_len: usize, index: usize, stride: usiz
 pub const unsafe fn offset_by<T>(mem: *const u8) -> *const u8 {
     let byte_offset = std::mem::size_of::<T>();
     let ptr = mem.add(byte_offset);
-    // let offset = mem.align_offset(align_of::<T>());
-    // let ptr = mem.add(offset).cast::<T>();
-    // let ptr = ptr.add(1);
-    //
-    // let offset = ptr.align_offset(align_of::<u8>());
-    // let ptr = ptr.add(offset).cast::<u8>();
     ptr
+}
+
+pub fn realloc_(ptr: *mut u8, old_layout: Layout, new_layout: Layout) -> *mut u8 {
+    let dst = unsafe { alloc_zeroed(new_layout) };
+    let dst = NonNull::new(dst).expect("Out of memory!!!");
+
+    copy_raw(dst.as_ptr(), new_layout.size(), ptr, old_layout.size());
+
+    unsafe { dealloc(ptr, old_layout) };
+    dst.as_ptr()
+    // self.mem.set(dst.as_ptr());
 }
