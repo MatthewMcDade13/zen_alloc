@@ -3,10 +3,12 @@ use std::{
     alloc::{alloc_zeroed, dealloc, realloc, Layout},
     cell::Cell,
     marker::PhantomData,
-    mem::align_of,
+    mem::{align_of, size_of},
     ops::{Deref, DerefMut, Index, IndexMut},
     ptr::NonNull,
 };
+
+use anyhow::bail;
 
 pub trait MemCell: bytemuck::Pod + bytemuck::Zeroable {
     fn init(self) -> Self {
@@ -114,10 +116,18 @@ impl BlockVec {
     // TODO :: Refactor this to return an Option/Result<RawRef<T>>
     // ideally, the owner of this struct will allocate manually with self::resize,
     // and if for some reason we can't allocate because we are full, then return None/Err
-    pub fn alloc<T>(&self, v: T) -> RawRef<T>
+    pub fn alloc<T: Sized>(&self, v: T) -> anyhow::Result<RawRef<T>>
     where
         T: MemCell,
     {
+        if size_of::<T>() > self.block_size() {
+            bail!(
+                "BlockVec::alloc::<T>() => Given Type Size is greater than BlockVec block_size. type_size: {:?}, block_size: {}",
+                size_of::<T>(),
+                self.block_size()
+            );
+        }
+
         let first_avail = if self.first_avail.get() > self.len() {
             let next = self.len();
             self.resize(self.len() * 2);
@@ -137,18 +147,22 @@ impl BlockVec {
 
             let v = v.init();
             // view.write_bytes(v);
-            unsafe { view.write_raw(v) };
+            unsafe {
+                view.write_raw(v);
+            };
 
             h
         };
+        self.first_avail.set(header.next);
 
         self.nactive.set(self.nactive.get() + 1);
 
-        RawRef {
+        let rr = RawRef {
             header,
             parent: self,
             _phantom: PhantomData,
-        }
+        };
+        Ok(rr)
     }
 
     fn view(&self, index: usize) -> BlockView {
@@ -546,6 +560,20 @@ struct BlockView<'alloc> {
     _phantom: PhantomData<&'alloc BlockVec>,
 }
 
+macro_rules! type_slice {
+    ($self: ident, $size_t: ident) => {{
+        let size = std::mem::size_of::<$size_t>();
+        &$self.mem[..size]
+    }};
+}
+
+macro_rules! type_slice_mut {
+    ($self: ident, $size_t: ident) => {{
+        let size = std::mem::size_of::<$size_t>();
+        &mut $self.mem[..size]
+    }};
+}
+
 impl<'a> BlockView<'a> {
     pub const fn alloc_size(&self) -> usize {
         std::mem::size_of::<BlockHeader>() + self.block_size()
@@ -559,8 +587,8 @@ impl<'a> BlockView<'a> {
     where
         T: bytemuck::Pod + bytemuck::Zeroable,
     {
-        let size = std::mem::size_of::<T>();
-        let x: &'a [u8] = &self.mem[..size];
+        let x: &'a [u8] = type_slice!(self, T);
+
         bytemuck::from_bytes::<T>(x)
     }
 
@@ -568,8 +596,7 @@ impl<'a> BlockView<'a> {
     where
         T: bytemuck::Pod + bytemuck::Zeroable,
     {
-        let size = std::mem::size_of::<T>();
-        let x: &'a mut [u8] = &mut self.mem[..size];
+        let x: &'a mut [u8] = type_slice_mut!(self, T);
         bytemuck::from_bytes_mut::<T>(x)
     }
 
@@ -579,7 +606,8 @@ impl<'a> BlockView<'a> {
     // {
     //     let size = std::mem::size_of::<T>();
     //     let x: &'a [u8] = &self.mem[..size];
-    //     let val = bytemuck::from_bytes::<T>(x);
+    //
+    //     ?"let val = bytemuck::from_bytes::<T>(x);
     //     BlockRef {
     //         header: *self.header,
     //         block_size: self.block_size,

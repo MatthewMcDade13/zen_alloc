@@ -59,14 +59,13 @@ mod tests {
         Ok(())
     }
 
-    // TODO :: Debug this, something isnt writing/reading memory correctly...
     #[test]
-    fn block_vec() -> anyhow::Result<()> {
+    fn block_vec_512() -> anyhow::Result<()> {
         let bv = BlockVec::with_capacity(512, 40);
 
-        let p = bv.alloc(Point { x: 56., y: 69. });
-        let x = bv.alloc(4).into_scoped();
-        let y = bv.alloc(usize::MAX).into_scoped();
+        let p = bv.alloc(Point { x: 56., y: 69. })?;
+        let x = bv.alloc(4)?.into_scoped();
+        let y = bv.alloc(usize::MAX)?.into_scoped();
 
         // let inner = RawRef::deref(p);
 
@@ -74,6 +73,135 @@ mod tests {
         assert_eq!(p.y, 69.);
         assert_eq!(*x, 4);
         assert_eq!(*y, usize::MAX);
+
+        Ok(())
+    }
+
+    #[test]
+    fn block_vec_256() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(256, 40);
+
+        let p = bv.alloc(Point { x: 56., y: 69. })?;
+        let x = bv.alloc(4)?.into_scoped();
+        let y = bv.alloc(usize::MAX)?.into_scoped();
+
+        // let inner = RawRef::deref(p);
+
+        assert_eq!(p.x, 56.);
+        assert_eq!(p.y, 69.);
+        assert_eq!(*x, 4);
+        assert_eq!(*y, usize::MAX);
+
+        Ok(())
+    }
+
+    #[test]
+    fn block_vec_128() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(128, 40);
+
+        let p = bv.alloc(Point { x: 56., y: 69. })?;
+        let x = bv.alloc(4)?.into_scoped();
+        let y = bv.alloc(usize::MAX)?.into_scoped();
+
+        // let inner = RawRef::deref(p);
+
+        assert_eq!(p.x, 56.);
+        assert_eq!(p.y, 69.);
+        assert_eq!(*x, 4);
+        assert_eq!(*y, usize::MAX);
+
+        Ok(())
+    }
+
+    #[test]
+    fn block_vec_64() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(64, 40);
+
+        let p = bv.alloc(Point { x: 56., y: 69. })?;
+        let x = bv.alloc(4)?.into_scoped();
+        let y = bv.alloc(usize::MAX)?.into_scoped();
+
+        // let inner = RawRef::deref(p);
+
+        assert_eq!(p.x, 56.);
+        assert_eq!(p.y, 69.);
+        assert_eq!(*x, 4);
+        assert_eq!(*y, usize::MAX);
+
+        Ok(())
+    }
+
+    #[test]
+    fn block_vec_32() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(32, 40);
+
+        let p = bv.alloc(Point { x: 56., y: 69. })?;
+        let x = bv.alloc(4)?.into_scoped();
+        let y = bv.alloc(usize::MAX)?.into_scoped();
+
+        // let inner = RawRef::deref(p);
+
+        assert_eq!(p.x, 56.);
+        assert_eq!(p.y, 69.);
+        assert_eq!(*x, 4);
+        assert_eq!(*y, usize::MAX);
+
+        Ok(())
+    }
+
+    #[test]
+    fn block_vec_16() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(16, 40);
+
+        let p = bv.alloc(Point { x: 56., y: 69. })?;
+        let x = bv.alloc(4)?.into_scoped();
+        let y = bv.alloc(usize::MAX)?.into_scoped();
+
+        // let inner = RawRef::deref(p);
+
+        assert_eq!(p.x, 56.);
+        assert_eq!(p.y, 69.);
+        assert_eq!(*x, 4);
+        assert_eq!(*y, usize::MAX);
+
+        Ok(())
+    }
+
+    #[test]
+    fn block_vec_8() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(8, 40);
+
+        let result = bv.alloc(Point { x: 56., y: 69. });
+        assert_eq!(result.is_err(), true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn block_vec_4() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(4, 40);
+
+        let result = bv.alloc(Point { x: 56., y: 69. });
+        assert_eq!(result.is_err(), true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn block_vec_2() -> anyhow::Result<()> {
+        let bv = BlockVec::with_capacity(2, 40);
+
+        let result = bv.alloc(Point { x: 56., y: 69. });
+        assert_eq!(result.is_err(), true);
+        // let x = bv.alloc(4)?.into_scoped();
+        // let y = bv.alloc(usize::MAX)?.into_scoped();
+
+        // let inner = RawRef::deref(p);
+
+        // assert_eq!(p.x, 56.);
+        // assert_eq!(p.y, 69.);
+        // assert_eq!(*x, 4);
+        // assert_eq!(*y, usize::MAX);
 
         Ok(())
     }

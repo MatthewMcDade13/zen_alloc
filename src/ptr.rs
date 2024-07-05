@@ -1,9 +1,38 @@
+use core::slice;
 use std::{
     alloc::{alloc, dealloc, Layout},
     marker::PhantomData,
     mem::align_of,
     ops::{Deref, DerefMut},
+    ptr::NonNull,
 };
+
+use crate::slab;
+
+// pub type Nil<T> = &'static T;
+const GLOBAL_NIL: usize = 80085101;
+#[derive(Debug, Clone, Copy)]
+pub struct Nil(&'static usize);
+impl Nil {
+    pub const fn get() -> NonNull<Nil> {
+        let r = NIL.0;
+        let r = std::ptr::from_ref(r);
+        unsafe { NonNull::new_unchecked(r as *mut _) }
+    }
+
+    #[inline]
+    pub fn addr() -> usize {
+        Self::get().as_ptr() as usize
+    }
+
+    #[inline]
+    pub fn is_nil<T>(v: *const T) -> bool {
+        let a = v as usize;
+        let b = Self::addr();
+        a == b
+    }
+}
+pub const NIL: Nil = Nil(&GLOBAL_NIL);
 
 #[derive(Debug)]
 pub struct Owned<T> {
