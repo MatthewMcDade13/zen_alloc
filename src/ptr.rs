@@ -7,21 +7,15 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::mem::{BlockPtrRaw, MemCell, Scoped};
-
-pub enum BlockPtr<'alloc, T>
-where
-    T: MemCell,
-{
-    Raw(BlockPtrRaw<'alloc, T>),
-    Scoped(Scoped<'alloc, T>),
-}
+use crate::mem::{MemCell, Scoped, Unbounded};
 
 pub enum ZenPtr<'alloc, T>
 where
     T: MemCell,
 {
-    Block(BlockPtr<'alloc, T>),
+    Unbounded(Unbounded<'alloc, T>),
+    Scoped(Scoped<'alloc, T>),
+    Raw(NonNull<T>),
 }
 
 // pub type Nil<T> = &'static T;

@@ -93,7 +93,7 @@ impl BlockVec {
     pub fn free<'a, T, Ptr>(&'a self, bh: Ptr)
     where
         T: MemCell,
-        Ptr: Into<BlockPtrRaw<'a, T>>,
+        Ptr: Into<Unbounded<'a, T>>,
     {
         let bh = bh.into();
         let first = self.first_avail.get();
@@ -119,7 +119,7 @@ impl BlockVec {
     // TODO :: Refactor this to return an Option/Result<RawRef<T>>
     // ideally, the owner of this struct will allocate manually with self::resize,
     // and if for some reason we can't allocate because we are full, then return None/Err
-    pub fn alloc<T: Sized>(&self, v: T) -> anyhow::Result<BlockPtrRaw<T>>
+    pub fn alloc<T: Sized>(&self, v: T) -> anyhow::Result<Unbounded<T>>
     where
         T: MemCell,
     {
@@ -160,7 +160,7 @@ impl BlockVec {
 
         self.nactive.set(self.nactive.get() + 1);
 
-        let rr = BlockPtrRaw {
+        let rr = Unbounded {
             header,
             parent: self,
             _phantom: PhantomData,
@@ -325,80 +325,96 @@ impl BlockVec {
     }
 }
 
-impl<'a, T> Index<BlockPtrRaw<'a, T>> for BlockVec
+impl<'a, T> Index<Unbounded<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
     type Output = T;
 
-    fn index(&self, index: BlockPtrRaw<'a, T>) -> &Self::Output {
+    fn index(&self, index: Unbounded<'a, T>) -> &Self::Output {
         self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<BlockPtrRaw<'a, T>> for BlockVec
+impl<'a, T> IndexMut<Unbounded<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
-    fn index_mut(&mut self, index: BlockPtrRaw<'a, T>) -> &mut Self::Output {
+    fn index_mut(&mut self, index: Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
     }
 }
 
-impl<'a, T> Index<&BlockPtrRaw<'a, T>> for BlockVec
+impl<'a, T> Index<&Unbounded<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
     type Output = T;
 
-    fn index(&self, index: &BlockPtrRaw<'a, T>) -> &Self::Output {
+    fn index(&self, index: &Unbounded<'a, T>) -> &Self::Output {
         self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<&BlockPtrRaw<'a, T>> for BlockVec
+impl<'a, T> IndexMut<&Unbounded<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
-    fn index_mut(&mut self, index: &BlockPtrRaw<'a, T>) -> &mut Self::Output {
+    fn index_mut(&mut self, index: &Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
     }
 }
 
-impl<'a, T> Index<&mut BlockPtrRaw<'a, T>> for BlockVec
+impl<'a, T> Index<&mut Unbounded<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
     type Output = T;
 
-    fn index(&self, index: &mut BlockPtrRaw<'a, T>) -> &Self::Output {
+    fn index(&self, index: &mut Unbounded<'a, T>) -> &Self::Output {
         self.view(index.header.id).cast_into()
     }
 }
 
-impl<'a, T> IndexMut<&mut BlockPtrRaw<'a, T>> for BlockVec
+impl<'a, T> IndexMut<&mut Unbounded<'a, T>> for BlockVec
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
-    fn index_mut(&mut self, index: &mut BlockPtrRaw<'a, T>) -> &mut Self::Output {
+    fn index_mut(&mut self, index: &mut Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
     }
 }
 
 #[derive(Debug)]
-pub struct Scoped<'alloc, T>(BlockPtrRaw<'alloc, T>)
+pub struct Scoped<'alloc, T>(Unbounded<'alloc, T>)
 where
     T: MemCell;
+
+impl<'a, T> Clone for Scoped<'a, T>
+where
+    T: MemCell,
+{
+    fn clone(&self) -> Self {
+        let s = &*self.0;
+
+        let other = self
+            .0
+            .parent
+            .alloc(s.clone())
+            .expect("Unable to deep clone Scoped Ptr.");
+        other.into_scoped()
+    }
+}
 
 impl<'a, T> Scoped<'a, T>
 where
     T: MemCell,
 {
-    pub fn as_ref(&self) -> &BlockPtrRaw<'a, T> {
+    pub fn as_ref(&self) -> &Unbounded<'a, T> {
         &self.0
     }
 
-    pub fn leak(&self) -> BlockPtrRaw<'a, T> {
+    pub fn leak(&self) -> Unbounded<'a, T> {
         self.0
     }
 }
@@ -428,16 +444,16 @@ where
     T: MemCell,
 {
     fn drop(&mut self) {
-        let inner = BlockPtrRaw::clone(&self.0);
+        let inner = Unbounded::clone(&self.0);
         self.0.parent.free(inner);
     }
 }
 
-impl<'a, T> From<BlockPtrRaw<'a, T>> for Scoped<'a, T>
+impl<'a, T> From<Unbounded<'a, T>> for Scoped<'a, T>
 where
     T: MemCell,
 {
-    fn from(value: BlockPtrRaw<'a, T>) -> Self {
+    fn from(value: Unbounded<'a, T>) -> Self {
         Self(value)
     }
 }
@@ -466,14 +482,13 @@ impl BlockHeader {
 }
 
 #[derive(Debug, Copy)]
-
-pub struct BlockPtrRaw<'alloc, T: MemCell> {
+pub struct Unbounded<'alloc, T: MemCell> {
     header: BlockHeader,
     parent: &'alloc BlockVec,
     _phantom: PhantomData<T>,
 }
 
-impl<'alloc, T> Clone for BlockPtrRaw<'alloc, T>
+impl<'alloc, T> Clone for Unbounded<'alloc, T>
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
@@ -486,7 +501,7 @@ where
     }
 }
 
-impl<'alloc, T> BlockPtrRaw<'alloc, T>
+impl<'alloc, T> Unbounded<'alloc, T>
 where
     T: MemCell,
 {
@@ -508,7 +523,7 @@ where
     }
 }
 
-impl<'alloc, T> Deref for BlockPtrRaw<'alloc, T>
+impl<'alloc, T> Deref for Unbounded<'alloc, T>
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
@@ -519,7 +534,7 @@ where
     }
 }
 
-impl<'alloc, T> DerefMut for BlockPtrRaw<'alloc, T>
+impl<'alloc, T> DerefMut for Unbounded<'alloc, T>
 where
     T: bytemuck::Pod + bytemuck::Zeroable,
 {
@@ -681,16 +696,27 @@ pub const unsafe fn offset_by<T>(mem: *const u8) -> *const u8 {
     ptr
 }
 
-pub fn realloc_(ptr: *mut u8, old_layout: Layout, new_layout: Layout) -> *mut u8 {
-    let dst = unsafe { alloc_zeroed(new_layout) };
-    let dst = NonNull::new(dst).expect("Out of memory!!!");
-
-    copy_raw(dst.as_ptr(), new_layout.size(), ptr, old_layout.size());
-
-    unsafe { dealloc(ptr, old_layout) };
-    dst.as_ptr()
-    // self.mem.set(dst.as_ptr());
+/// Fallback allocator uses standard lib to allocate/free each object.
+pub unsafe fn allocate<T>(val: T) -> NonNull<T> {
+    let layout = Layout::new::<T>();
+    let ptr = std::alloc::alloc_zeroed(layout) as *mut T;
+    NonNull::new(ptr).expect("Out of Memory!!!")
 }
+
+pub unsafe fn deallocate<T>(ptr: NonNull<T>) {
+    let layout = Layout::new::<T>();
+    std::alloc::dealloc(ptr.as_ptr() as _, layout);
+}
+// pub fn realloc_(ptr: *mut u8, old_layout: Layout, new_layout: Layout) -> *mut u8 {
+//     let dst = unsafe { alloc_zeroed(new_layout) };
+//     let dst = NonNull::new(dst).expect("Out of memory!!!");
+//
+//     copy_raw(dst.as_ptr(), new_layout.size(), ptr, old_layout.size());
+//
+//     unsafe { dealloc(ptr, old_layout) };
+//     dst.as_ptr()
+//     // self.mem.set(dst.as_ptr());
+// }
 
 #[derive(Error, Debug)]
 pub enum AllocError {
@@ -703,6 +729,10 @@ pub enum AllocError {
 
     #[error("Allocated buffer is full. Resize (grow) to allocate more.")]
     Full,
+    #[error("Attempted to lookup a block that is dead or exceeds the length of the vec. index(id): {id}, vec_len: {vec_len}")]
+    OutOfScope { id: usize, vec_len: usize },
     #[error("Operating System Out of Memory!!!")]
     OutOfMemory,
+    #[error("Allocator is not initialized")]
+    Uninit,
 }
