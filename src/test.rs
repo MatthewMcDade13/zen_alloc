@@ -2,7 +2,7 @@
 mod tests {
     use crate::{
         bump::BumpAllocator,
-        mem::{BlockVec, Byteable, Unbounded},
+        mem::{BlockVec, Byteable},
         stack::StackAllocator,
     };
 
