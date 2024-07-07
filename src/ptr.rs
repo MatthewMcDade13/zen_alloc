@@ -4,12 +4,12 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::mem::{MemCell, Unbounded};
+use crate::mem::{Byteable, Unbounded};
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum ZenPtr<'alloc, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     Unbounded(Unbounded<'alloc, T>),
     Raw(NonNull<T>),
@@ -17,7 +17,7 @@ where
 
 impl<'a, T> Deref for ZenPtr<'a, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     type Target = T;
 
@@ -31,7 +31,7 @@ where
 
 impl<'a, T> DerefMut for ZenPtr<'a, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {

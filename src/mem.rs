@@ -9,34 +9,79 @@ use std::{
 };
 
 use anyhow::{bail, ensure};
+use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
 
 use crate::ptr::ZenPtr;
 
-pub trait MemCell: bytemuck::Pod + bytemuck::Zeroable {
-    fn init(self) -> Self {
-        self
+pub unsafe trait Byteable {
+    fn as_bytes(&self) -> &[u8]
+    where
+        Self: Sized,
+    {
+        let ptr = self as *const Self;
+        let ptr = ptr as *const u8;
+        let size = size_of::<Self>();
+        unsafe { slice::from_raw_parts(ptr, size) }
     }
 
-    fn delete(self) {}
+    // fn from_bytes()
 }
 
-// impl MemCell for () {}
-// impl MemCell for u8 {}
-// impl MemCell for i8 {}
-// impl MemCell for u16 {}
-// impl MemCell for i16 {}
-// impl MemCell for u32 {}
-// impl MemCell for i32 {}
-// impl MemCell for u64 {}
-// impl MemCell for i64 {}
-// impl MemCell for usize {}
-// impl MemCell for isize {}
-// impl MemCell for u128 {}
-// impl MemCell for i128 {}
-// impl MemCell for f32 {}
-// impl MemCell for f64 {}
-impl<T> MemCell for T where T: bytemuck::Pod + bytemuck::Zeroable {}
+pub unsafe fn from_bytes<T>(bytes: &[u8]) -> anyhow::Result<&T>
+where
+    T: Byteable,
+{
+    let size = size_of::<T>();
+    if size > bytes.len() {
+        bail!(
+            "Type must be at least size of given byte slice. T: {size}, bytes: {}",
+            bytes.len()
+        )
+    }
+    let ptr = NonNull::new(bytes.as_ptr().cast_mut()).expect("Given byte slice pointer is null!!!");
+    let t = unsafe { ptr.cast::<T>().as_ref() };
+    Ok(t)
+    // todo!();
+}
+
+pub unsafe fn from_bytes_mut<T>(bytes: &mut [u8]) -> anyhow::Result<&mut T>
+where
+    T: Byteable,
+{
+    let size = size_of::<T>();
+    if size > bytes.len() {
+        bail!(
+            "Type must be at least size of given byte slice. T: {size}, bytes: {}",
+            bytes.len()
+        )
+    }
+    let ptr = NonNull::new(bytes.as_mut_ptr()).expect("Given byte slice pointer is null!!!");
+    let t = unsafe { ptr.cast::<T>().as_mut() };
+    Ok(t)
+}
+
+unsafe impl<T> Byteable for &T {}
+unsafe impl<T> Byteable for &mut T {}
+unsafe impl<T> Byteable for *mut T {}
+unsafe impl<T> Byteable for *const T {}
+unsafe impl<T> Byteable for NonNull<T> {}
+
+unsafe impl Byteable for () {}
+unsafe impl Byteable for u8 {}
+unsafe impl Byteable for i8 {}
+unsafe impl Byteable for u16 {}
+unsafe impl Byteable for i16 {}
+unsafe impl Byteable for u32 {}
+unsafe impl Byteable for i32 {}
+unsafe impl Byteable for u64 {}
+unsafe impl Byteable for i64 {}
+unsafe impl Byteable for usize {}
+unsafe impl Byteable for isize {}
+unsafe impl Byteable for u128 {}
+unsafe impl Byteable for i128 {}
+unsafe impl Byteable for f32 {}
+unsafe impl Byteable for f64 {}
 
 #[derive(Debug)]
 pub struct BlockVec {
@@ -87,19 +132,19 @@ impl BlockVec {
 
     pub fn get<T>(&self, id: usize) -> &T
     where
-        T: MemCell,
+        T: Byteable,
     {
         self.view(id).cast_into()
     }
 
     pub fn free<'a, T, Ptr>(&'a self, bh: Ptr)
     where
-        T: MemCell,
+        T: Byteable + 'a,
         Ptr: Into<Unbounded<'a, T>>,
     {
         let bh = bh.into();
         let first = self.first_avail.get();
-        bh.delete();
+        // bh.delete();
         self.nactive.set(self.nactive.get() - 1);
 
         let next = {
@@ -123,7 +168,7 @@ impl BlockVec {
     // and if for some reason we can't allocate because we are full, then return None/Err
     pub fn alloc<T: Sized>(&self, v: T) -> anyhow::Result<Unbounded<T>>
     where
-        T: MemCell,
+        T: Byteable,
     {
         ensure!(
             size_of::<T>() <= self.block_size(),
@@ -151,7 +196,7 @@ impl BlockVec {
 
             let h = *view.header;
 
-            let v = v.init();
+            // let v = v.init();
             unsafe {
                 view.write_raw(v);
             };
@@ -169,6 +214,8 @@ impl BlockVec {
         };
         Ok(rr)
     }
+
+    // pub fn alloc_bytes(&self, nbytes: usize) -> anyhow::Result<Unbounded<[u8]>> {}
 
     fn view(&self, index: usize) -> BlockView {
         let byte_offset = index * self.block_size_full();
@@ -321,7 +368,7 @@ impl BlockVec {
 
 impl<'a, T> Index<Unbounded<'a, T>> for BlockVec
 where
-    T: MemCell,
+    T: Byteable,
 {
     type Output = T;
 
@@ -332,7 +379,7 @@ where
 
 impl<'a, T> IndexMut<Unbounded<'a, T>> for BlockVec
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn index_mut(&mut self, index: Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
@@ -341,7 +388,7 @@ where
 
 impl<'a, T> Index<&Unbounded<'a, T>> for BlockVec
 where
-    T: MemCell,
+    T: Byteable,
 {
     type Output = T;
 
@@ -352,7 +399,7 @@ where
 
 impl<'a, T> IndexMut<&Unbounded<'a, T>> for BlockVec
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn index_mut(&mut self, index: &Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
@@ -361,7 +408,7 @@ where
 
 impl<'a, T> Index<&mut Unbounded<'a, T>> for BlockVec
 where
-    T: MemCell,
+    T: Byteable,
 {
     type Output = T;
 
@@ -372,7 +419,7 @@ where
 
 impl<'a, T> IndexMut<&mut Unbounded<'a, T>> for BlockVec
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn index_mut(&mut self, index: &mut Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
@@ -382,17 +429,17 @@ where
 #[derive(Debug)]
 pub struct Scoped<'alloc, T>(ZenPtr<'alloc, T>)
 where
-    T: MemCell;
+    T: Byteable;
 
 impl<'a, T> Clone for Scoped<'a, T>
 where
-    T: MemCell,
+    T: Byteable + Clone,
 {
     fn clone(&self) -> Self {
         let s = self.0.deref();
 
         match self.0 {
-            ZenPtr::Unbounded(ptr) => {
+            ZenPtr::Unbounded(ref ptr) => {
                 let other = ptr
                     .parent
                     .alloc(s.clone())
@@ -406,7 +453,7 @@ where
 
 impl<'a, T> Scoped<'a, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     pub fn leak(&self) -> &ZenPtr<'a, T> {
         &self.0
@@ -415,7 +462,7 @@ where
 
 impl<'a, T> Deref for Scoped<'a, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     type Target = T;
 
@@ -426,7 +473,7 @@ where
 
 impl<'a, T> DerefMut for Scoped<'a, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
@@ -435,11 +482,11 @@ where
 
 impl<'a, T> Drop for Scoped<'a, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn drop(&mut self) {
         match self.0 {
-            ZenPtr::Unbounded(ptr) => {
+            ZenPtr::Unbounded(ref ptr) => {
                 let inner = Unbounded::clone(&ptr);
                 ptr.parent.free(inner);
             }
@@ -450,7 +497,7 @@ where
 
 impl<'a, T> From<Unbounded<'a, T>> for Scoped<'a, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn from(value: Unbounded<'a, T>) -> Self {
         Self(ZenPtr::Unbounded(value))
@@ -481,15 +528,15 @@ impl BlockHeader {
 }
 
 #[derive(Debug, Copy)]
-pub struct Unbounded<'alloc, T: MemCell> {
+pub struct Unbounded<'alloc, T: Byteable> {
     header: BlockHeader,
     parent: &'alloc BlockVec,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<&'alloc T>,
 }
 
 impl<'alloc, T> Clone for Unbounded<'alloc, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn clone(&self) -> Self {
         Self {
@@ -502,7 +549,7 @@ where
 
 impl<'alloc, T> Unbounded<'alloc, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     pub const fn id(&self) -> usize {
         self.header.id
@@ -524,7 +571,7 @@ where
 
 impl<'alloc, T> Deref for Unbounded<'alloc, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     type Target = T;
 
@@ -535,7 +582,7 @@ where
 
 impl<'alloc, T> DerefMut for Unbounded<'alloc, T>
 where
-    T: MemCell,
+    T: Byteable,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.parent.view(self.header.id).cast_into_mut::<T>()
@@ -575,19 +622,21 @@ impl<'a> BlockView<'a> {
 
     pub fn cast_into<T>(self) -> &'a T
     where
-        T: MemCell,
+        T: Byteable,
     {
         let x: &'a [u8] = type_slice!(self, T);
 
-        bytemuck::from_bytes::<T>(x)
+        unsafe { self::from_bytes(x).unwrap() }
+        // bytemuck::from_bytes::<T>(x)
     }
 
     pub fn cast_into_mut<T>(self) -> &'a mut T
     where
-        T: MemCell,
+        T: Byteable,
     {
         let x: &'a mut [u8] = type_slice_mut!(self, T);
-        bytemuck::from_bytes_mut::<T>(x)
+        unsafe { self::from_bytes_mut(x).unwrap() }
+        // bytemuck::from_bytes_mut::<T>(x)
     }
 
     // NOTE :: Lifetimes make these below conversion functions 'safe', but
@@ -596,25 +645,28 @@ impl<'a> BlockView<'a> {
 
     pub fn cast<T>(&'a self) -> &'a T
     where
-        T: MemCell,
+        T: Byteable,
     {
         let x: &'a [u8] = type_slice!(self, T);
-        bytemuck::from_bytes(x)
+        unsafe { self::from_bytes(x).unwrap() }
+        // bytemuck::from_bytes(x)
     }
 
     pub fn cast_mut<T>(&'a mut self) -> &'a mut T
     where
-        T: MemCell,
+        T: Byteable,
     {
         let x: &'a mut [u8] = type_slice_mut!(self, T);
-        bytemuck::from_bytes_mut(x)
+        unsafe { self::from_bytes_mut(x).unwrap() }
+        // bytemuck::from_bytes_mut(x)
     }
 
     pub fn write_bytes<T>(&'a mut self, v: T)
     where
-        T: MemCell,
+        T: Byteable,
     {
-        let val = bytemuck::bytes_of(&v);
+        let val = v.as_bytes();
+        // let val = bytemuck::bytes_of(&v);
         self::copy(self.mem, val);
         // let inner = self.cast_mut::<T>();
         // *inner = v;
@@ -622,7 +674,7 @@ impl<'a> BlockView<'a> {
 
     pub unsafe fn write_raw<T>(&'a mut self, v: T)
     where
-        T: MemCell,
+        T: Byteable,
     {
         let ptr = self.mem.as_mut_ptr();
         let offset = ptr.align_offset(align_of::<T>());
@@ -735,3 +787,66 @@ pub enum AllocError {
     #[error("Allocator is not initialized")]
     Uninit,
 }
+
+/// Used internally for inital allocation as well as
+/// serializing ZenPtrs for allocation
+#[repr(C)]
+#[derive(Debug, Copy, Zeroable)]
+struct Bytes {
+    header: BlockHeader,
+    parent: *const BlockVec,
+    _phantom: PhantomData<[u8]>,
+}
+
+impl Clone for Bytes {
+    fn clone(&self) -> Self {
+        Self {
+            header: self.header,
+            parent: self.parent,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+// #[repr(transparent)]
+// pub struct ZenHandle<'alloc, T>()
+
+// #[repr(transparent)]
+// #[derive(Debug, Pod, Zeroable, Copy, Clone)]
+// pub struct ZenHandle<'alloc, T>
+// where
+//     T: MemCell,
+// {
+//     ptr: Bytes,
+//     _phantom: PhantomData<&'alloc T>,
+// }
+
+// impl<'a, T> From<Bytes> for Unbounded<'a, T>
+// where
+//     T: MemCell,
+// {
+//     fn from(value: Bytes) -> Self {
+//         let header = value.header;
+//         let parent: &'a BlockVec = unsafe { value.parent.as_ref() };
+//         Self {
+//             header,
+//             parent,
+//             _phantom: PhantomData,
+//         }
+//     }
+// }
+//
+// impl<'a, T> From<Unbounded<'a, T>> for Bytes
+// where
+//     T: MemCell,
+// {
+//     fn from(value: Unbounded<'a, T>) -> Self {
+//         let header = value.header;
+//         let parent = value.parent.as_ptr().cast::<BlockVec>();
+//         Self {
+//             header,
+//             parent,
+//             _phantom: PhantomData,
+//         }
+//     }
+// }

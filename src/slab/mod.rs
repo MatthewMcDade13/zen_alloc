@@ -1,5 +1,5 @@
 use crate::{
-    mem::{BlockVec, MemCell, Unbounded},
+    mem::{BlockVec, Byteable, Unbounded},
     ptr::ZenPtr,
 };
 
@@ -19,7 +19,7 @@ impl Slab {
 
     pub fn alloc<T>(&self, val: T) -> anyhow::Result<ZenPtr<T>>
     where
-        T: MemCell,
+        T: Byteable,
     {
         if let Some(block) = self.block_for::<T>() {
             if block.is_uninit() {
@@ -40,7 +40,7 @@ impl Slab {
 
     pub fn free<T>(&self, ptr: Unbounded<T>)
     where
-        T: MemCell,
+        T: Byteable,
     {
         if let Some(block) = self.block_for::<T>() {
             block.free(ptr)
@@ -51,7 +51,7 @@ impl Slab {
 
     fn block_for<T>(&self) -> Option<&BlockVec>
     where
-        T: MemCell,
+        T: Byteable,
     {
         let size = std::mem::size_of::<T>();
         for (i, s) in Self::SIZES.iter().enumerate() {

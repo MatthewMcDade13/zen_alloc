@@ -2,16 +2,18 @@
 mod tests {
     use crate::{
         bump::BumpAllocator,
-        mem::{Unbounded, BlockVec, MemCell},
+        mem::{BlockVec, Byteable, Unbounded},
         stack::StackAllocator,
     };
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    #[derive(Debug, Clone, Copy)]
     struct Point {
         x: f64,
         y: f64,
     }
+
+    unsafe impl Byteable for Point {}
 
     #[test]
     fn stack() -> anyhow::Result<()> {
