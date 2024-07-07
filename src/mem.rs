@@ -11,6 +11,8 @@ use std::{
 use anyhow::{bail, ensure};
 use thiserror::Error;
 
+use crate::ptr::ZenPtr;
+
 pub trait MemCell: bytemuck::Pod + bytemuck::Zeroable {
     fn init(self) -> Self {
         self
@@ -85,7 +87,7 @@ impl BlockVec {
 
     pub fn get<T>(&self, id: usize) -> &T
     where
-        T: bytemuck::Pod + bytemuck::Zeroable,
+        T: MemCell,
     {
         self.view(id).cast_into()
     }
@@ -239,14 +241,6 @@ impl BlockVec {
         Layout::array::<u8>(self.nbytes()).expect("Layout::array => nbytes too big")
     }
 
-    // fn realloc_inner(&mut self, new_size: usize) {
-    //     self.len = new_size;
-    //     unsafe {
-    //         let ptr = std::alloc::realloc(self.buf.as_ptr(), self.layout(), self.len);
-    //         self.buf = NonNull::new(ptr).expect("Out of Memory!!");
-    //     }
-    // }
-
     /// Resizes inner buffer into a new allocated one with new size and
     /// memcpys the old vals into new allocated buffer, then frees old buffer.
     /// Allocates if new_size > self.len, otherwise self.len is decreased. (no need to
@@ -327,7 +321,7 @@ impl BlockVec {
 
 impl<'a, T> Index<Unbounded<'a, T>> for BlockVec
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     type Output = T;
 
@@ -338,7 +332,7 @@ where
 
 impl<'a, T> IndexMut<Unbounded<'a, T>> for BlockVec
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     fn index_mut(&mut self, index: Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
@@ -347,7 +341,7 @@ where
 
 impl<'a, T> Index<&Unbounded<'a, T>> for BlockVec
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     type Output = T;
 
@@ -358,7 +352,7 @@ where
 
 impl<'a, T> IndexMut<&Unbounded<'a, T>> for BlockVec
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     fn index_mut(&mut self, index: &Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
@@ -367,7 +361,7 @@ where
 
 impl<'a, T> Index<&mut Unbounded<'a, T>> for BlockVec
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     type Output = T;
 
@@ -378,7 +372,7 @@ where
 
 impl<'a, T> IndexMut<&mut Unbounded<'a, T>> for BlockVec
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     fn index_mut(&mut self, index: &mut Unbounded<'a, T>) -> &mut Self::Output {
         self.view(index.header.id).cast_into_mut()
@@ -386,7 +380,7 @@ where
 }
 
 #[derive(Debug)]
-pub struct Scoped<'alloc, T>(Unbounded<'alloc, T>)
+pub struct Scoped<'alloc, T>(ZenPtr<'alloc, T>)
 where
     T: MemCell;
 
@@ -395,14 +389,18 @@ where
     T: MemCell,
 {
     fn clone(&self) -> Self {
-        let s = &*self.0;
+        let s = self.0.deref();
 
-        let other = self
-            .0
-            .parent
-            .alloc(s.clone())
-            .expect("Unable to deep clone Scoped Ptr.");
-        other.into_scoped()
+        match self.0 {
+            ZenPtr::Unbounded(ptr) => {
+                let other = ptr
+                    .parent
+                    .alloc(s.clone())
+                    .expect("Unable to deep clone Scoped Ptr.");
+                other.into_scoped()
+            }
+            ZenPtr::Raw(_) => todo!(),
+        }
     }
 }
 
@@ -410,12 +408,8 @@ impl<'a, T> Scoped<'a, T>
 where
     T: MemCell,
 {
-    pub fn as_ref(&self) -> &Unbounded<'a, T> {
+    pub fn leak(&self) -> &ZenPtr<'a, T> {
         &self.0
-    }
-
-    pub fn leak(&self) -> Unbounded<'a, T> {
-        self.0
     }
 }
 
@@ -423,7 +417,7 @@ impl<'a, T> Deref for Scoped<'a, T>
 where
     T: MemCell,
 {
-    type Target = T; // RawRef<'a, T>;
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
         self.0.deref()
@@ -444,8 +438,13 @@ where
     T: MemCell,
 {
     fn drop(&mut self) {
-        let inner = Unbounded::clone(&self.0);
-        self.0.parent.free(inner);
+        match self.0 {
+            ZenPtr::Unbounded(ptr) => {
+                let inner = Unbounded::clone(&ptr);
+                ptr.parent.free(inner);
+            }
+            ZenPtr::Raw(ptr) => unsafe { deallocate(ptr) },
+        }
     }
 }
 
@@ -454,7 +453,7 @@ where
     T: MemCell,
 {
     fn from(value: Unbounded<'a, T>) -> Self {
-        Self(value)
+        Self(ZenPtr::Unbounded(value))
     }
 }
 
@@ -490,7 +489,7 @@ pub struct Unbounded<'alloc, T: MemCell> {
 
 impl<'alloc, T> Clone for Unbounded<'alloc, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     fn clone(&self) -> Self {
         Self {
@@ -525,7 +524,7 @@ where
 
 impl<'alloc, T> Deref for Unbounded<'alloc, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     type Target = T;
 
@@ -536,7 +535,7 @@ where
 
 impl<'alloc, T> DerefMut for Unbounded<'alloc, T>
 where
-    T: bytemuck::Pod + bytemuck::Zeroable,
+    T: MemCell,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.parent.view(self.header.id).cast_into_mut::<T>()
@@ -576,7 +575,7 @@ impl<'a> BlockView<'a> {
 
     pub fn cast_into<T>(self) -> &'a T
     where
-        T: bytemuck::Pod + bytemuck::Zeroable,
+        T: MemCell,
     {
         let x: &'a [u8] = type_slice!(self, T);
 
@@ -585,7 +584,7 @@ impl<'a> BlockView<'a> {
 
     pub fn cast_into_mut<T>(self) -> &'a mut T
     where
-        T: bytemuck::Pod + bytemuck::Zeroable,
+        T: MemCell,
     {
         let x: &'a mut [u8] = type_slice_mut!(self, T);
         bytemuck::from_bytes_mut::<T>(x)
@@ -597,7 +596,7 @@ impl<'a> BlockView<'a> {
 
     pub fn cast<T>(&'a self) -> &'a T
     where
-        T: bytemuck::Pod + bytemuck::Zeroable,
+        T: MemCell,
     {
         let x: &'a [u8] = type_slice!(self, T);
         bytemuck::from_bytes(x)
@@ -605,7 +604,7 @@ impl<'a> BlockView<'a> {
 
     pub fn cast_mut<T>(&'a mut self) -> &'a mut T
     where
-        T: bytemuck::Pod + bytemuck::Zeroable,
+        T: MemCell,
     {
         let x: &'a mut [u8] = type_slice_mut!(self, T);
         bytemuck::from_bytes_mut(x)
@@ -613,7 +612,7 @@ impl<'a> BlockView<'a> {
 
     pub fn write_bytes<T>(&'a mut self, v: T)
     where
-        T: bytemuck::Pod,
+        T: MemCell,
     {
         let val = bytemuck::bytes_of(&v);
         self::copy(self.mem, val);

@@ -1,21 +1,44 @@
 use core::slice;
 use std::{
-    alloc::{alloc, dealloc, Layout},
-    marker::PhantomData,
-    mem::align_of,
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
 
-use crate::mem::{MemCell, Scoped, Unbounded};
+use crate::mem::{MemCell, Unbounded};
 
+#[derive(Debug)]
 pub enum ZenPtr<'alloc, T>
 where
     T: MemCell,
 {
     Unbounded(Unbounded<'alloc, T>),
-    Scoped(Scoped<'alloc, T>),
     Raw(NonNull<T>),
+}
+
+impl<'a, T> Deref for ZenPtr<'a, T>
+where
+    T: MemCell,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            ZenPtr::Unbounded(ptr) => ptr.deref(),
+            ZenPtr::Raw(ptr) => unsafe { ptr.as_ref() },
+        }
+    }
+}
+
+impl<'a, T> DerefMut for ZenPtr<'a, T>
+where
+    T: MemCell,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            ZenPtr::Unbounded(ref mut ptr) => ptr.deref_mut(),
+            ZenPtr::Raw(ref mut ptr) => unsafe { ptr.as_mut() },
+        }
+    }
 }
 
 // pub type Nil<T> = &'static T;
