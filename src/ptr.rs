@@ -6,6 +6,7 @@ use std::{
 
 use crate::mem::{Byteable, Unbounded};
 
+#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub enum ZenPtr<'alloc, T>
 where

@@ -9,11 +9,24 @@ use std::{
 };
 
 use anyhow::{bail, ensure};
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, ZeroableInOption};
 use thiserror::Error;
 
-use crate::ptr::ZenPtr;
+use crate::{
+    array::{self, Array, Slice, SlicePtr},
+    ptr::ZenPtr,
+};
 
+pub struct BlockRef<'alloc, T>
+where
+    T: Byteable,
+{
+    id: usize,
+    parent: &'alloc BlockVec,
+    _phantom: PhantomData<&'alloc [T]>,
+}
+
+/// Structs implementing this type MUST BE `[repr(C)]`
 pub unsafe trait Byteable {
     fn as_bytes(&self) -> &[u8]
     where
@@ -61,6 +74,11 @@ where
     Ok(t)
 }
 
+unsafe impl<T> Byteable for Cell<T> where T: Byteable {}
+
+unsafe impl<T> Byteable for Option<T> where T: Byteable {}
+unsafe impl<T> Byteable for [T] where T: Byteable {}
+unsafe impl<T> Byteable for &[T] where T: Byteable {}
 unsafe impl<T> Byteable for &T {}
 unsafe impl<T> Byteable for &mut T {}
 unsafe impl<T> Byteable for *mut T {}
@@ -98,7 +116,7 @@ pub struct BlockVec {
 impl Clone for BlockVec {
     fn clone(&self) -> Self {
         let mut new = Self::with_capacity(self.block_size, self.len());
-        self::copy(new.bytes_mut(), self.bytes());
+        self::write_bytes(new.bytes_mut(), self.bytes());
         new
     }
 }
@@ -148,11 +166,11 @@ impl BlockVec {
         self.nactive.set(self.nactive.get() - 1);
 
         let next = {
-            let mut view = self.view(bh.header.id);
+            let mut view = self.view(bh.id());
 
             let next = view.header.next;
             // view_mut.header.alive = false;
-            view.header.alive = BlockHeader::DEAD;
+            view.header.state = BlockState::Dead;
 
             view.header.next = first;
 
@@ -160,7 +178,45 @@ impl BlockVec {
             next
         };
 
-        self.first_avail.set(next);
+        self.first_avail.set(next as usize);
+    }
+
+    fn alloc_bytes(&self, nbytes: usize) -> anyhow::Result<Bytes> {
+        ensure!(
+            nbytes <= self.block_size(),
+            AllocError::TypeTooLarge {
+                type_name: std::any::type_name::<&[u8]>().into(),
+                type_size: nbytes,
+                block_size: self.block_size()
+            }
+        );
+
+        let next_id = if self.first_avail.get() > self.len() {
+            bail!(AllocError::Full);
+        } else {
+            self.first_avail.get()
+        };
+
+        let header = {
+            let mut view = self.view(next_id);
+            view.header.state = BlockState::Bytes(nbytes);
+
+            let h = *view.header;
+
+            h
+        };
+        self.first_avail.set(header.next as usize);
+
+        self.nactive.set(self.nactive.get() + 1);
+
+        let parent = self as *const Self;
+        let parent = NonNull::new(parent as _).expect("BlockVec => Self is null!!!");
+        let bs = Bytes {
+            id: next_id,
+            parent,
+            _phantom: PhantomData,
+        };
+        Ok(bs)
     }
 
     // TODO :: Refactor this to return an Option/Result<RawRef<T>>
@@ -170,52 +226,111 @@ impl BlockVec {
     where
         T: Byteable,
     {
-        ensure!(
-            size_of::<T>() <= self.block_size(),
-            AllocError::TypeTooLarge {
-                type_name: std::any::type_name::<T>().into(),
-                type_size: size_of::<T>(),
-                block_size: self.block_size()
-            }
-        );
+        let bytes = self.alloc_bytes(size_of::<T>())?;
+        let typed = bytes.to_ptr(v);
+        Ok(typed)
+        // Ok(bytes)
+        // ensure!(
+        //     size_of::<T>() <= self.block_size(),
+        //     AllocError::TypeTooLarge {
+        //         type_name: std::any::type_name::<T>().into(),
+        //         type_size: size_of::<T>(),
+        //         block_size: self.block_size()
+        //     }
+        // );
+        //
+        // let next_id = if self.first_avail.get() > self.len() {
+        //     bail!(AllocError::Full);
+        // } else {
+        //     self.first_avail.get()
+        // };
+        //
+        // let header = {
+        //     let mut view = self.view(next_id);
+        //     view.header.state = BlockState::Single;
+        //
+        //     let h = *view.header;
+        //
+        //     // let v = v.init();
+        //     unsafe {
+        //         view.write_raw(v);
+        //     };
+        //
+        //     h
+        // };
+        // self.first_avail.set(header.next as usize);
+        //
+        // self.nactive.set(self.nactive.get() + 1);
+        //
+        // let rr = Unbounded {
+        //     id: next_id,
+        //     parent: self,
+        //     _phantom: PhantomData,
+        // };
+        // Ok(rr)
+    }
 
-        let first_avail = if self.first_avail.get() > self.len() {
-            bail!(AllocError::Full);
-            // let next = self.len();
-            // self.resize(self.len() * 2);
-
-            // self.first_avail.set(next);
-            // next
+    fn emplace_alloc<T>(&self, vec: Vec<T>) -> anyhow::Result<Unbounded<Array<T>>>
+    where
+        T: Byteable,
+    {
+        let bytes = self.alloc_bytes(Array::<T>::size_of(vec.len()))?;
+        let mut view = self.view(bytes.id());
+        let len = if let BlockState::Bytes(n) = view.header.state {
+            n / std::mem::size_of::<T>()
         } else {
-            self.first_avail.get()
+            unreachable!()
         };
+        view.header.state = BlockState::Array(len);
+        let arr = unsafe { Array::from_alloced(bytes.mem_ptr(), vec.len()) };
 
-        let header = {
-            let mut view = self.view(first_avail);
-            view.header.alive = BlockHeader::ALIVE;
-
-            let h = *view.header;
-
-            // let v = v.init();
-            unsafe {
-                view.write_raw(v);
-            };
-
-            h
-        };
-        self.first_avail.set(header.next);
-
-        self.nactive.set(self.nactive.get() + 1);
-
-        let rr = Unbounded {
-            header,
+        let arr = unsafe { arr.as_ref() };
+        view.write_array(arr, vec.as_slice());
+        let ptr = Unbounded {
+            id: bytes.id(),
             parent: self,
             _phantom: PhantomData,
         };
-        Ok(rr)
+        Ok(ptr)
     }
 
-    // pub fn alloc_bytes(&self, nbytes: usize) -> anyhow::Result<Unbounded<[u8]>> {}
+    pub fn array_reserve<T>(&self, n: usize) -> anyhow::Result<array::Slice<T>>
+    where
+        T: Byteable,
+    {
+        let size = size_of::<T>();
+        let total_size = (size * n) + size_of::<array::Array<T>>();
+        let arr = if total_size < self.block_size_full() {
+            let v = Vec::<T>::with_capacity(n);
+            let arr = unsafe { self.emplace_alloc(v)? };
+            Slice::Block(SlicePtr::from(arr))
+        } else {
+            let layout = Layout::array::<u8>(total_size)?;
+            let arr = unsafe {
+                let p = unsafe { std::alloc::alloc_zeroed(layout) };
+                let head = NonNull::new(p).expect("Out of Memory!!!");
+                Array::<T>::from_alloced(head, n)
+            };
+            Slice::Fallback(arr)
+
+            //     unsafe {
+            //         let arr = head.add(1).cast::<u8>();
+            //         let offset = arr.align_offset(align_of::<T>());
+            //         let arr = arr.add(offset).cast::<T>();
+            //         let arr = Array::from_raw_parts(arr, 1, n);
+            //         NonNull::write(head, arr);
+            //         arr
+            //     }
+        };
+        Ok(arr)
+    }
+
+    pub fn array<T>(&self) -> anyhow::Result<array::Slice<T>>
+    where
+        T: Byteable,
+    {
+        self.array_reserve(0)
+    }
 
     fn view(&self, index: usize) -> BlockView {
         let byte_offset = index * self.block_size_full();
@@ -307,9 +422,9 @@ impl BlockVec {
             for i in old_len..new_size {
                 let v = self.view(i);
                 *v.header = BlockHeader {
-                    id: i,
+                    // id: i,
                     next: i + 1,
-                    alive: BlockHeader::DEAD,
+                    state: BlockState::Dead,
                     ..Default::default()
                 };
             }
@@ -373,7 +488,7 @@ where
     type Output = T;
 
     fn index(&self, index: Unbounded<'a, T>) -> &Self::Output {
-        self.view(index.header.id).cast_into()
+        self.view(index.id()).cast_into()
     }
 }
 
@@ -382,7 +497,7 @@ where
     T: Byteable,
 {
     fn index_mut(&mut self, index: Unbounded<'a, T>) -> &mut Self::Output {
-        self.view(index.header.id).cast_into_mut()
+        self.view(index.id()).cast_into_mut()
     }
 }
 
@@ -393,7 +508,7 @@ where
     type Output = T;
 
     fn index(&self, index: &Unbounded<'a, T>) -> &Self::Output {
-        self.view(index.header.id).cast_into()
+        self.view(index.id()).cast_into()
     }
 }
 
@@ -402,7 +517,7 @@ where
     T: Byteable,
 {
     fn index_mut(&mut self, index: &Unbounded<'a, T>) -> &mut Self::Output {
-        self.view(index.header.id).cast_into_mut()
+        self.view(index.id()).cast_into_mut()
     }
 }
 
@@ -413,7 +528,7 @@ where
     type Output = T;
 
     fn index(&self, index: &mut Unbounded<'a, T>) -> &Self::Output {
-        self.view(index.header.id).cast_into()
+        self.view(index.id()).cast_into()
     }
 }
 
@@ -422,10 +537,11 @@ where
     T: Byteable,
 {
     fn index_mut(&mut self, index: &mut Unbounded<'a, T>) -> &mut Self::Output {
-        self.view(index.header.id).cast_into_mut()
+        self.view(index.id()).cast_into_mut()
     }
 }
 
+#[repr(C)]
 #[derive(Debug)]
 pub struct Scoped<'alloc, T>(ZenPtr<'alloc, T>)
 where
@@ -504,32 +620,56 @@ where
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct BlockHeader {
-    id: usize,
-    next: usize,
-    // cant use bool with bytemuck, so we use u16 to also provide the padding we want.
-    alive: u16,
-    _padding: u16,
-    _padding2: u32,
+#[repr(usize)]
+#[derive(Debug, Default, Clone, Copy)]
+enum BlockState {
+    #[default]
+    Dead = 0,
+    Single = 1,
+    Bytes(usize),
+    Array(usize),
 }
 
-impl BlockHeader {
-    pub const ALIVE: u16 = 1;
-
-    // This block can be used for a new allocation.
-    pub const DEAD: u16 = 0;
-
-    /// True if self.alive is anything besides 0
-    pub const fn alive(&self) -> bool {
-        self.alive > 0
+impl BlockState {
+    pub const fn try_to_array(&self, array_type_size: usize) -> Option<BlockState> {
+        match *self {
+            BlockState::Bytes(n) => Some(BlockState::Array(n / array_type_size)),
+            BlockState::Array(_) => Some(*self),
+            _ => None,
+        }
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct BlockHeader {
+    next: usize,
+    state: BlockState,
+}
+
+unsafe impl Byteable for BlockHeader {}
+
+impl BlockHeader {
+    pub const ALIVE: usize = 1;
+
+    // This block can be used for a new allocation.
+    pub const DEAD: usize = 0;
+
+    /// True if self.alive is anything besides 0
+    pub const fn alive(&self) -> bool {
+        if let BlockState::Dead = &self.state {
+            false
+        } else {
+            true
+        }
+    }
+}
+
+#[repr(C)]
 #[derive(Debug, Copy)]
 pub struct Unbounded<'alloc, T: Byteable> {
-    header: BlockHeader,
+    id: usize,
+    // header: BlockHeader,
     parent: &'alloc BlockVec,
     _phantom: PhantomData<&'alloc T>,
 }
@@ -540,7 +680,8 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            header: self.header,
+            id: self.id,
+
             parent: self.parent,
             _phantom: PhantomData,
         }
@@ -551,8 +692,13 @@ impl<'alloc, T> Unbounded<'alloc, T>
 where
     T: Byteable,
 {
+    pub fn write(&mut self, v: T) {
+        let mut view = self.parent.view(self.id());
+        view.write_bytes(v);
+    }
+
     pub const fn id(&self) -> usize {
-        self.header.id
+        self.id as usize
     }
 
     pub fn is_alive(&self) -> bool {
@@ -585,7 +731,7 @@ where
     T: Byteable,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.parent.view(self.header.id).cast_into_mut::<T>()
+        self.parent.view(self.id()).cast_into_mut::<T>()
     }
 }
 
@@ -661,25 +807,50 @@ impl<'a> BlockView<'a> {
         // bytemuck::from_bytes_mut(x)
     }
 
+    pub fn write_array<T>(&'a mut self, arr: &Array<'a, T>, vec: &[T])
+    where
+        T: Byteable,
+    {
+        let mut head = arr.as_bytes();
+        let bs = vec
+            .iter()
+            .flat_map(|x| x.as_bytes())
+            .map(|x| *x)
+            .collect::<Vec<u8>>();
+
+        let bs = [head, bs.as_slice()].concat();
+        self::write_bytes(self.mem, bs.as_slice());
+    }
+
+    pub fn write_vec<T>(&'a mut self, vec: Vec<T>)
+    where
+        T: Byteable,
+    {
+        let bs = vec
+            .iter()
+            .flat_map(|x| x.as_bytes())
+            .map(|x| *x)
+            .collect::<Vec<u8>>();
+        self::write_bytes(self.mem, bs.as_slice());
+    }
+
     pub fn write_bytes<T>(&'a mut self, v: T)
     where
         T: Byteable,
     {
         let val = v.as_bytes();
         // let val = bytemuck::bytes_of(&v);
-        self::copy(self.mem, val);
+        self::write_bytes(self.mem, val);
         // let inner = self.cast_mut::<T>();
         // *inner = v;
     }
 
-    pub unsafe fn write_raw<T>(&'a mut self, v: T)
+    pub fn write_raw<T>(&'a mut self, v: T)
     where
         T: Byteable,
     {
         let ptr = self.mem.as_mut_ptr();
-        let offset = ptr.align_offset(align_of::<T>());
-        let ptr = ptr.add(offset).cast::<T>();
-        std::ptr::write(ptr, v);
+        unsafe { self::write_from(ptr, v) };
     }
 
     pub fn clear_zero(&'a mut self) {
@@ -694,12 +865,21 @@ pub fn copy_raw(dst_ptr: *mut u8, dst_len: usize, src_ptr: *const u8, src_len: u
         (dst, src)
     };
 
-    self::copy(dst, src);
+    self::write_bytes(dst, src);
 }
 
-pub fn copy(dst: &mut [u8], src: &[u8]) {
+pub fn write_bytes(dst: &mut [u8], src: &[u8]) {
     let n = std::cmp::min(dst.len(), src.len());
     dst[..n].copy_from_slice(&src[..n])
+}
+
+pub unsafe fn write_from<T>(ptr: *mut u8, v: T)
+where
+    T: Byteable,
+{
+    let offset = ptr.align_offset(align_of::<T>());
+    let ptr = ptr.add(offset).cast::<T>();
+    std::ptr::write(ptr, v);
 }
 
 impl Drop for BlockVec {
@@ -788,20 +968,71 @@ pub enum AllocError {
     Uninit,
 }
 
-/// Used internally for inital allocation as well as
-/// serializing ZenPtrs for allocation
 #[repr(C)]
-#[derive(Debug, Copy, Zeroable)]
-struct Bytes {
-    header: BlockHeader,
-    parent: *const BlockVec,
+#[derive(Debug, Copy)]
+pub struct Bytes {
+    id: usize,
+    parent: NonNull<BlockVec>,
     _phantom: PhantomData<[u8]>,
+}
+unsafe impl Byteable for Bytes {}
+
+impl Bytes {
+    const fn id(&self) -> usize {
+        self.id as usize
+    }
+
+    pub fn to_array<'a, T>(self, v: &[T]) -> Unbounded<'a, T>
+    where
+        T: Byteable,
+    {
+        let id = self.id;
+        let parent: &'a BlockVec = unsafe { self.parent.as_ref() };
+        let mut view = parent.view(id);
+        view.header.state = view
+            .header
+            .state
+            .try_to_array(size_of::<T>())
+            .expect("Self is not Bytes!!!");
+        let mem = NonNull::new(view.mem.as_ptr() as _).expect("Null ptr deref!!!");
+        let arr = unsafe { Array::from_alloced(mem, v.len()).as_ref() };
+        view.write_array(arr, v);
+        Unbounded {
+            id,
+            parent,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn to_ptr<'a, T>(self, v: T) -> Unbounded<'a, T>
+    where
+        T: Byteable,
+    {
+        let id = self.id;
+        let parent: &'a BlockVec = unsafe { self.parent.as_ref() };
+        let mut view = parent.view(id);
+        view.header.state = BlockState::Single;
+        view.write_bytes(v);
+        Unbounded {
+            id,
+            parent,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub(crate) fn mem_ptr(&self) -> NonNull<u8> {
+        let view = unsafe { self.parent.as_ref().view(self.id) };
+        let mem = view.mem.as_ptr();
+        NonNull::new(mem as _).expect("mem is null!!")
+    }
+
+    // const fn into_many(self) ->
 }
 
 impl Clone for Bytes {
     fn clone(&self) -> Self {
         Self {
-            header: self.header,
+            id: self.id,
             parent: self.parent,
             _phantom: PhantomData,
         }
@@ -821,32 +1052,17 @@ impl Clone for Bytes {
 //     _phantom: PhantomData<&'alloc T>,
 // }
 
-// impl<'a, T> From<Bytes> for Unbounded<'a, T>
-// where
-//     T: MemCell,
-// {
-//     fn from(value: Bytes) -> Self {
-//         let header = value.header;
-//         let parent: &'a BlockVec = unsafe { value.parent.as_ref() };
-//         Self {
-//             header,
-//             parent,
-//             _phantom: PhantomData,
-//         }
-//     }
-// }
-//
-// impl<'a, T> From<Unbounded<'a, T>> for Bytes
-// where
-//     T: MemCell,
-// {
-//     fn from(value: Unbounded<'a, T>) -> Self {
-//         let header = value.header;
-//         let parent = value.parent.as_ptr().cast::<BlockVec>();
-//         Self {
-//             header,
-//             parent,
-//             _phantom: PhantomData,
-//         }
-//     }
-// }
+impl<'a, T> From<Unbounded<'a, T>> for Bytes
+where
+    T: Byteable,
+{
+    fn from(value: Unbounded<'a, T>) -> Self {
+        let id = value.id;
+        let parent = value.parent.as_ptr().cast::<BlockVec>();
+        Self {
+            id,
+            parent,
+            _phantom: PhantomData,
+        }
+    }
+}
