@@ -4,11 +4,11 @@ use std::{
     cell::Cell,
     marker::PhantomData,
     mem::{align_of, size_of},
-    ops::Deref,
+    ops::{Deref, Index},
     ptr::NonNull,
 };
 
-use crate::mem::{Byteable, Bytes, Unbounded};
+use crate::mem::{BlockVec, Byteable, Bytes, Unbounded};
 
 pub mod htable;
 pub mod str;
@@ -22,6 +22,17 @@ pub(crate) struct Array<'alloc, T: Byteable> {
     rc: usize,
     ptr: &'alloc [T],
     // _phantom: PhantomData<&'alloc [T]>,
+}
+
+impl<'a, T> Index<usize> for Array<'a, T>
+where
+    T: Byteable,
+{
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.ptr[index]
+    }
 }
 
 impl<'a, T> Array<'a, T>
@@ -45,6 +56,11 @@ where
             NonNull::write(head, s);
             head
         }
+    }
+
+    pub fn index_ptr(&self, index: usize) -> NonNull<T> {
+        let elem = self.index(index) as *const T;
+        NonNull::new(elem as _).expect("attempt to read invalid pointer!!!")
     }
 
     pub const fn len(&self) -> usize {
@@ -87,7 +103,11 @@ impl<'a, T> SlicePtr<'a, T>
 where
     T: Byteable,
 {
-    pub fn inner_ptr(&self) -> NonNull<Array<'a, T>> {
+    pub fn index_ptr(&self, index: usize) -> NonNull<T> {
+        self.ptr.index_ptr(index)
+    }
+
+    pub(crate) fn inner_ptr(&self) -> NonNull<Array<'a, T>> {
         let p = self.ptr.deref();
         let ptr = std::ptr::from_ref(p);
         NonNull::new(ptr as _).expect("inner pointer is null!!!")
@@ -122,6 +142,32 @@ pub enum Slice<'alloc, T: Byteable> {
     Fallback(NonNull<Array<'alloc, T>>),
 }
 
+impl<'a, T> Slice<'a, T>
+where
+    T: Byteable,
+{
+    pub fn len(&self) -> usize {
+        match *self {
+            Slice::Block(ref slice) => unsafe { slice.inner_ptr().as_ref().len() },
+            Slice::Fallback(arr) => unsafe { arr.as_ref().len() },
+        }
+    }
+
+    pub(crate) fn inner_ptr(&self) -> NonNull<Array<'a, T>> {
+        match *self {
+            Slice::Block(ref slice) => slice.inner_ptr(),
+            Slice::Fallback(arr) => arr,
+        }
+    }
+
+    pub fn index_ptr(&self, index: usize) -> NonNull<T> {
+        match *self {
+            Slice::Block(ref slice) => slice.index_ptr(index),
+            Slice::Fallback(arr) => unsafe { arr.as_ref().index_ptr(index) },
+        }
+    }
+}
+
 impl<'a, T> Clone for Slice<'a, T>
 where
     T: Byteable,
@@ -141,6 +187,105 @@ where
                 arr_ref.rc += 1;
                 Slice::Fallback(arr)
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SliceIter<'a, T: Byteable> {
+    curr_index: usize,
+    len: usize,
+    parent: NonNull<Array<'a, T>>,
+    _phantom: PhantomData<&'a T>,
+}
+
+impl<'a, T> Index<usize> for SlicePtr<'a, T>
+where
+    T: Byteable,
+{
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        let arr = unsafe { self.inner_ptr().as_ref() };
+        arr.index(index)
+    }
+}
+
+impl<'a, T> Index<usize> for Slice<'a, T>
+where
+    T: Byteable,
+{
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        match *self {
+            Slice::Block(ref slice) => slice.index(index),
+            Slice::Fallback(arr) => unsafe { arr.as_ref().index(index) },
+        }
+    }
+}
+
+impl<'a, T> SliceIter<'a, T>
+where
+    T: Byteable,
+{
+    pub fn inner_ref(&self) -> &Array<'a, T> {
+        unsafe { self.parent.as_ref() }
+    }
+}
+
+impl<'a, T> std::iter::Iterator for SliceIter<'a, T>
+where
+    T: Byteable,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.curr_index >= self.len {
+            None
+        } else {
+            let i = self.curr_index;
+            self.curr_index += 1;
+            let arr = self.inner_ref();
+            let elem = arr.index_ptr(i);
+            let elem = unsafe { NonNull::read(elem) };
+            Some(elem)
+        }
+    }
+}
+
+impl<'a, T> std::iter::DoubleEndedIterator for SliceIter<'a, T>
+where
+    T: Byteable,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.curr_index <= 0 {
+            None
+        } else {
+            let i = self.curr_index;
+            self.curr_index -= 1;
+            let arr = self.inner_ref();
+            let elem = arr.index_ptr(i);
+            let elem = unsafe { NonNull::read(elem) };
+            Some(elem)
+        }
+    }
+}
+
+impl<'a, T> std::iter::IntoIterator for Slice<'a, T>
+where
+    T: Byteable,
+{
+    type Item = T;
+
+    type IntoIter = SliceIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Self::IntoIter {
+            curr_index: 0,
+            len: self.len(),
+            parent: self.inner_ptr(),
+            _phantom: PhantomData,
         }
     }
 }

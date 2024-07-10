@@ -332,7 +332,7 @@ impl BlockVec {
         self.array_reserve(0)
     }
 
-    fn view(&self, index: usize) -> BlockView {
+    pub(crate) fn view(&self, index: usize) -> BlockView {
         let byte_offset = index * self.block_size_full();
 
         assert!(
@@ -688,6 +688,18 @@ where
     }
 }
 
+impl<'alloc, T> Unbounded<'alloc, Array<'alloc, T>>
+where
+    T: Byteable,
+{
+    pub fn write_array(&mut self, v: &[T]) {
+        let ptr = self.clone();
+        let arr = ptr.deref();
+        let mut view = self.parent.view(self.id());
+        view.write_array(arr, v);
+    }
+}
+
 impl<'alloc, T> Unbounded<'alloc, T>
 where
     T: Byteable,
@@ -695,6 +707,12 @@ where
     pub fn write(&mut self, v: T) {
         let mut view = self.parent.view(self.id());
         view.write_bytes(v);
+    }
+
+    pub fn read(&self) -> T {
+        let view = self.parent.view(self.id());
+        let ptr = view.to_ptr::<T>();
+        unsafe { NonNull::read(ptr) }
     }
 
     pub const fn id(&self) -> usize {
@@ -855,6 +873,14 @@ impl<'a> BlockView<'a> {
 
     pub fn clear_zero(&'a mut self) {
         bytemuck::fill_zeroes(self.mem);
+    }
+
+    pub fn to_ptr<T>(self) -> NonNull<T>
+    where
+        T: Byteable,
+    {
+        let ptr = self.mem.as_ptr();
+        NonNull::new(ptr as _).expect("Memory ref is invalid!!!")
     }
 }
 
