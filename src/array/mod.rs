@@ -4,7 +4,7 @@ use std::{
     cell::Cell,
     marker::PhantomData,
     mem::{align_of, size_of},
-    ops::{Deref, Index},
+    ops::{Deref, DerefMut, Index},
     ptr::NonNull,
 };
 
@@ -13,13 +13,76 @@ use crate::mem::{BlockVec, Byteable, Bytes, Unbounded};
 pub mod htable;
 pub mod str;
 
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct ArrayPtr<'alloc, T: Byteable> {
+    ptr: NonNull<Array<'alloc, T>>,
+}
+
+impl<'a, T> Copy for ArrayPtr<'a, T> where T: Byteable {}
+impl<'a, T> Clone for ArrayPtr<'a, T>
+where
+    T: Byteable,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, T> ArrayPtr<'a, T>
+where
+    T: Byteable,
+{
+    pub const fn as_ptr(&self) -> *const Array<'a, T> {
+        self.ptr.as_ptr()
+    }
+
+    pub const fn as_ref(&self) -> &'a Array<'a, T> {
+        unsafe { self.ptr.as_ref() }
+    }
+
+    pub fn as_mut(&mut self) -> &mut Array<'a, T> {
+        unsafe { self.ptr.as_mut() }
+    }
+}
+
+impl<'a, T> Deref for ArrayPtr<'a, T>
+where
+    T: Byteable,
+{
+    type Target = Array<'a, T>;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl<'a, T> DerefMut for ArrayPtr<'a, T>
+where
+    T: Byteable,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.ptr.as_mut() }
+    }
+}
+
+impl<'a, T> From<NonNull<Array<'a, T>>> for ArrayPtr<'a, T>
+where
+    T: Byteable,
+{
+    fn from(value: NonNull<Array<'a, T>>) -> Self {
+        Self { ptr: value }
+    }
+}
+
 // TODO:: Add capacity for Array/Slice
 
 /// Actual allocated block of memory
 #[repr(C)]
 #[derive(Debug)]
-pub(crate) struct Array<'alloc, T: Byteable> {
+pub struct Array<'alloc, T: Byteable> {
     rc: usize,
+
     ptr: &'alloc [T],
     // _phantom: PhantomData<&'alloc [T]>,
 }
@@ -107,10 +170,12 @@ where
         self.ptr.index_ptr(index)
     }
 
-    pub(crate) fn inner_ptr(&self) -> NonNull<Array<'a, T>> {
+    pub(crate) fn inner_ptr(&self) -> ArrayPtr<'a, T> {
         let p = self.ptr.deref();
         let ptr = std::ptr::from_ref(p);
-        NonNull::new(ptr as _).expect("inner pointer is null!!!")
+        NonNull::new(ptr as _)
+            .expect("inner pointer is null!!!")
+            .into()
     }
     // pub unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self {
     //     let ptr = Unbounded::from(ptr);
@@ -139,7 +204,7 @@ unsafe impl<'a, T> Byteable for SlicePtr<'a, T> where T: Byteable {}
 #[derive(Debug)]
 pub enum Slice<'alloc, T: Byteable> {
     Block(SlicePtr<'alloc, T>),
-    Fallback(NonNull<Array<'alloc, T>>),
+    Fallback(ArrayPtr<'alloc, T>),
 }
 
 impl<'a, T> Slice<'a, T>
@@ -147,16 +212,16 @@ where
     T: Byteable,
 {
     pub fn len(&self) -> usize {
-        match *self {
-            Slice::Block(ref slice) => unsafe { slice.inner_ptr().as_ref().len() },
-            Slice::Fallback(arr) => unsafe { arr.as_ref().len() },
+        match self {
+            Slice::Block(slice) => slice.inner_ptr().len(),
+            Slice::Fallback(arr) => arr.len(),
         }
     }
 
-    pub(crate) fn inner_ptr(&self) -> NonNull<Array<'a, T>> {
-        match *self {
+    pub(crate) fn inner_ptr(&self) -> ArrayPtr<'a, T> {
+        match self {
             Slice::Block(ref slice) => slice.inner_ptr(),
-            Slice::Fallback(arr) => arr,
+            Slice::Fallback(arr) => *arr,
         }
     }
 
@@ -195,7 +260,7 @@ where
 pub struct SliceIter<'a, T: Byteable> {
     curr_index: usize,
     len: usize,
-    parent: NonNull<Array<'a, T>>,
+    parent: ArrayPtr<'a, T>,
     _phantom: PhantomData<&'a T>,
 }
 
@@ -206,7 +271,8 @@ where
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
-        let arr = unsafe { self.inner_ptr().as_ref() };
+        let ptr = self.inner_ptr();
+        let arr: &'a Array<'a, T> = ptr.as_ref();
         arr.index(index)
     }
 }

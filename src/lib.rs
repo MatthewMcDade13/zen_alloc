@@ -1,6 +1,7 @@
 #![feature(non_null_convenience)]
 
 pub mod array;
+pub mod block;
 pub mod bump;
 pub mod mem;
 pub mod pool;

@@ -6,6 +6,7 @@ use std::{
     mem::{align_of, size_of},
     ops::{Deref, DerefMut, Index, IndexMut},
     ptr::NonNull,
+    rc::Rc,
 };
 
 use anyhow::{bail, ensure};
@@ -16,15 +17,6 @@ use crate::{
     array::{self, Array, Slice, SlicePtr},
     ptr::ZenPtr,
 };
-
-pub struct BlockRef<'alloc, T>
-where
-    T: Byteable,
-{
-    id: usize,
-    parent: &'alloc BlockVec,
-    _phantom: PhantomData<&'alloc [T]>,
-}
 
 /// Structs implementing this type MUST BE `[repr(C)]`
 pub unsafe trait Byteable {
@@ -311,7 +303,7 @@ impl BlockVec {
                 let head = NonNull::new(p).expect("Out of Memory!!!");
                 Array::<T>::from_alloced(head, n)
             };
-            Slice::Fallback(arr)
+            Slice::Fallback(arr.into())
 
             //     unsafe {
             //         let arr = head.add(1).cast::<u8>();
@@ -642,7 +634,7 @@ impl BlockState {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
-struct BlockHeader {
+pub(crate) struct BlockHeader {
     next: usize,
     state: BlockState,
 }
@@ -667,7 +659,7 @@ impl BlockHeader {
 
 #[repr(C)]
 #[derive(Debug, Copy)]
-pub struct Unbounded<'alloc, T: Byteable> {
+pub struct Unbounded<'alloc, T: Byteable + ?Sized> {
     id: usize,
     // header: BlockHeader,
     parent: &'alloc BlockVec,
@@ -942,15 +934,40 @@ pub fn index_read<T>(ptr: *const u8, mem_len: usize, index: usize, stride: usize
 }
 
 #[inline]
-pub fn index_write<T>(ptr: *const u8, mem_len: usize, index: usize, stride: usize, val: T) {
-    let ptr = self::index::<T>(ptr, mem_len, index, stride).unwrap() as *mut T;
-    unsafe { std::ptr::write(ptr, val) }
+pub fn index_write<T>(
+    ptr: *mut u8,
+    mem_len: usize,
+    index: usize,
+    stride: usize,
+    val: T,
+) -> anyhow::Result<()> {
+    if let Some(ptr) = self::index::<T>(ptr, mem_len, index, stride) {
+        unsafe { std::ptr::write(ptr.cast_mut(), val) };
+    } else {
+        bail!("index out of range!")
+    }
+
+    Ok(())
 }
 
 pub const unsafe fn offset_by<T>(mem: *const u8) -> *const u8 {
     let byte_offset = std::mem::size_of::<T>();
     let ptr = mem.add(byte_offset);
     ptr
+}
+
+pub unsafe fn allocate_array<T>(n: usize) -> (NonNull<T>, usize) {
+    let layout = Layout::array::<T>(n).expect("allocate_array => Layout Error");
+    let ptr = std::alloc::alloc_zeroed(layout) as *mut T;
+    (
+        NonNull::new(ptr).expect("Out of Memory!!!"),
+        size_of::<T>() * n,
+    )
+}
+
+pub unsafe fn deallocate_array<T>(ptr: NonNull<T>, n: usize) {
+    let layout = Layout::array::<T>(n).expect("deallocate_array => Layout Error");
+    std::alloc::dealloc(ptr.as_ptr() as _, layout);
 }
 
 /// Fallback allocator uses standard lib to allocate/free each object.

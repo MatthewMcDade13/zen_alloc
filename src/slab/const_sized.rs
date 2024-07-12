@@ -13,6 +13,10 @@ pub trait ZenAlloc: Sized {
     fn get_ptr<T>(&self, handle: Handle<T, Self>) -> *mut T;
 }
 
+pub trait Sb<const N: usize> {
+    fn new_block() -> SizedBlock<N>;
+}
+
 #[derive(Debug, Clone)]
 pub struct SizedBlock<const SIZE: usize>([u8; SIZE]);
 
