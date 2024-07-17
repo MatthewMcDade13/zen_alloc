@@ -286,7 +286,7 @@ where
     fn index(&self, index: usize) -> &Self::Output {
         match *self {
             Slice::Block(ref slice) => slice.index(index),
-            Slice::Fallback(arr) => unsafe { arr.as_ref().index(index) },
+            Slice::Fallback(arr) => arr.as_ref().index(index),
         }
     }
 }
@@ -296,7 +296,7 @@ where
     T: Byteable,
 {
     pub fn inner_ref(&self) -> &Array<'a, T> {
-        unsafe { self.parent.as_ref() }
+        self.parent.as_ref()
     }
 }
 

@@ -1,4 +1,7 @@
-use zen_alloc::mem::BlockVec;
+use zen_alloc::{
+    block::MemPool,
+    mem::{BlockVec, Byteable},
+};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -7,18 +10,20 @@ pub struct Point {
     y: f32,
 }
 
+unsafe impl Byteable for Point {}
+
 fn main() -> anyhow::Result<()> {
-    let bv = BlockVec::with_capacity(512, 40);
+    let pool = MemPool::<512>::new(32);
 
-    // let p = bv.alloc(Point { x: 56., y: 69. });
-    let x = bv.alloc(4)?;
-    let y = bv.alloc(usize::MAX)?;
+    // let p = pool.alloc(Point { x: 56., y: 69. })?;
+    // let x = pool.alloc(4)?;
+    // let y = pool.alloc(usize::MAX)?;
 
-    // let inner = RawRef::deref(p);
+    // let inner = BlockPtr::deref(p);
 
     // assert_eq!(p.x, 56.);
     // assert_eq!(p.y, 69.);
-    assert_eq!(*x, 4);
-    assert_eq!(*y, usize::MAX);
+    // assert_eq!(*x, 4);
+    // assert_eq!(*y, usize::MAX);
     Ok(())
 }

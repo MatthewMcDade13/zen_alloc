@@ -30,10 +30,26 @@ pub unsafe trait Byteable {
         unsafe { slice::from_raw_parts(ptr, size) }
     }
 
+    fn clone_from_bytes(bytes: &[u8]) -> anyhow::Result<Self>
+    where
+        Self: Sized + Clone,
+    {
+        let t = unsafe { from_bytes::<Self>(bytes)? };
+        Ok(t.clone())
+    }
+
+    fn copy_from_bytes(bytes: &[u8]) -> anyhow::Result<Self>
+    where
+        Self: Sized + Copy,
+    {
+        let t = unsafe { from_bytes::<Self>(bytes)? };
+        Ok(*t)
+    }
+
     // fn from_bytes()
 }
 
-pub unsafe fn from_bytes<T>(bytes: &[u8]) -> anyhow::Result<&T>
+pub unsafe fn from_bytes<'a, T>(bytes: &'a [u8]) -> anyhow::Result<&'a T>
 where
     T: Byteable,
 {
@@ -50,7 +66,7 @@ where
     // todo!();
 }
 
-pub unsafe fn from_bytes_mut<T>(bytes: &mut [u8]) -> anyhow::Result<&mut T>
+pub unsafe fn from_bytes_mut<'a, T>(bytes: &'a mut [u8]) -> anyhow::Result<&'a mut T>
 where
     T: Byteable,
 {
@@ -903,6 +919,37 @@ where
 impl Drop for BlockVec {
     fn drop(&mut self) {
         unsafe { dealloc(self.raw(), self.layout()) }
+    }
+}
+
+#[inline]
+pub fn index_write_s<T>(head: NonNull<T>, len: usize, index: usize, val: T) -> anyhow::Result<()> {
+    if let Some(ptr) = index_s(head, len, index) {
+        unsafe { NonNull::write(ptr, val) }
+        Ok(())
+    } else {
+        bail!("index out of range!")
+    }
+}
+
+#[inline]
+pub fn index_read_s<T>(head: NonNull<T>, len: usize, index: usize) -> anyhow::Result<T> {
+    if let Some(ptr) = index_s(head, len, index) {
+        let v = unsafe { NonNull::read(ptr) };
+        Ok(v)
+    } else {
+        bail!("index out of range!")
+    }
+}
+
+#[inline]
+pub fn index_s<T>(head: NonNull<T>, len: usize, index: usize) -> Option<NonNull<T>> {
+    if index >= len {
+        None
+    } else {
+        let ptr = unsafe { head.add(index) };
+
+        Some(ptr)
     }
 }
 

@@ -9,7 +9,9 @@ use std::{
 
 use anyhow::{bail, ensure};
 
-use crate::mem::{allocate_array, from_bytes, from_bytes_mut, index_write, AllocError, Byteable};
+use crate::mem::{
+    allocate_array, from_bytes, from_bytes_mut, index_s, index_write, AllocError, Byteable,
+};
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -144,7 +146,7 @@ impl MemState {
 #[repr(C)]
 #[derive(Debug, Default, Clone)]
 pub(crate) struct MemHeader {
-    next: usize,
+    next: PoolHandle,
     state: MemState,
 }
 
@@ -152,20 +154,39 @@ unsafe impl Byteable for MemHeader {}
 
 #[derive(Debug)]
 pub struct MemPool<const SIZE: usize> {
-    first_avail: Cell<usize>,
+    first_avail: Cell<PoolHandle>,
 
     len: Cell<usize>,
     mem: Cell<NonNull<MemBlock<SIZE>>>,
 }
 
-impl<const S: usize> Index<usize> for MemPool<S> {
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct PoolHandle(usize);
+
+impl From<usize> for PoolHandle {
+    fn from(value: usize) -> Self {
+        Self(value)
+    }
+}
+
+impl<const S: usize> Index<PoolHandle> for MemPool<S> {
     type Output = MemBlock<S>;
 
-    fn index(&self, index: usize) -> &Self::Output {
-        let val = self.index_raw(index).unwrap();
+    fn index(&self, index: PoolHandle) -> &Self::Output {
+        let val = self.index_raw(index).expect("Index out of range!!");
         unsafe { val.as_ref() }
     }
 }
+
+// impl<const S: usize> Index<usize> for MemPool<S> {
+//     type Output = MemBlock<S>;
+//
+//     fn index(&self, index: usize) -> &Self::Output {
+//         let val = self.index_raw(index).expect("Index out of range!!");
+//         unsafe { val.as_ref() }
+//     }
+// }
 
 // impl<const S: usize> IndexMut<usize> for MemPool<S> {
 //     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
@@ -175,28 +196,23 @@ impl<const S: usize> Index<usize> for MemPool<S> {
 // }
 
 impl<const S: usize> MemPool<S> {
-    pub(crate) fn mut_view<'a>(&'a self, index: usize) -> MemBlockMut<'a, S> {
+    pub(crate) fn mut_view<'a>(&'a self, index: PoolHandle) -> MemBlockMut<'a, S> {
         let block = self.index_raw(index).expect("index out of range!");
         MemBlockMut::new(block)
     }
 
-    fn index_raw(&self, index: usize) -> anyhow::Result<NonNull<MemBlock<S>>> {
-        let block_size = size_of::<MemBlock<S>>();
-        let mem_len = self.len() * block_size;
-        let val =
-            crate::mem::index::<MemBlock<S>>(self.mem.as_ptr() as _, mem_len, index, block_size)
-                .expect("Out of range!!!");
-        if let Some(ptr) = NonNull::new(val as _) {
-            Ok(ptr)
+    fn index_raw(&self, index: PoolHandle) -> anyhow::Result<NonNull<MemBlock<S>>> {
+        if let Some(val) = index_s::<MemBlock<S>>(self.mem.get(), self.len(), index.0) {
+            Ok(val)
         } else {
-            bail!("Null pointer deref!")
+            bail!("Index out of range!")
         }
     }
     pub fn len(&self) -> usize {
         self.len.get()
     }
     pub fn empty() -> Self {
-        let first_avail = Cell::new(0);
+        let first_avail = Cell::new(PoolHandle(0));
         let mem = Cell::new(NonNull::dangling());
         Self {
             first_avail,
@@ -214,14 +230,13 @@ impl<const S: usize> MemPool<S> {
         } else if new_size > self.len() {
             let old_len = self.len();
             let delta = new_size - old_len;
-            // let new_len = new_size + self.len();
+
             self.grow(delta);
 
             for i in old_len..new_size {
-                let v = self.mut_view(i);
+                let v = self.mut_view(i.into());
                 *v.head = MemHeader {
-                    // id: i,
-                    next: i + 1,
+                    next: PoolHandle(i + 1),
                     state: MemState::Dead,
                     ..Default::default()
                 };
@@ -254,9 +269,6 @@ impl<const S: usize> MemPool<S> {
         if self.is_uninit() {
             self.len.set(nblocks);
             let ptr = unsafe { alloc_zeroed(self.layout()) };
-            if ptr.is_null() {
-                panic!("Out of memory!!!")
-            }
             let ptr = NonNull::new(ptr).expect("Out of memory!!!");
             self.mem.set(ptr.cast::<MemBlock<S>>());
         } else {
@@ -283,32 +295,36 @@ impl<const S: usize> MemPool<S> {
     }
 
     pub fn new(len: usize) -> Self {
-        let first_avail = Cell::new(0);
-        // let mut mem = Vec::with_capacity(len);
-        let (mem, nbytes) = unsafe { allocate_array::<MemBlock<S>>(len) };
+        let s = Self::empty();
+        s.resize(len);
 
-        for i in 0..len {
-            let h = MemHeader {
-                next: i + 1,
-                state: MemState::Dead,
-            };
-            let block = MemBlock::<S>::new(h);
-            index_write(
-                mem.as_ptr() as *mut u8,
-                nbytes,
-                i,
-                size_of::<MemBlock<S>>(),
-                block,
-            )
-            .expect("index write fail in MemPool::new");
-        }
-        let len = Cell::new(len);
-        let mem = Cell::new(mem);
-        Self {
-            first_avail,
-            mem,
-            len,
-        }
+        s
+        // let first_avail = Cell::new(0);
+        // // let mut mem = Vec::with_capacity(len);
+        // let (mem, nbytes) = unsafe { allocate_array::<MemBlock<S>>(len) };
+        //
+        // for i in 0..len {
+        //     let h = MemHeader {
+        //         next: i + 1,
+        //         state: MemState::Dead,
+        //     };
+        //     let block = MemBlock::<S>::new(h);
+        //     index_write(
+        //         mem.as_ptr() as *mut u8,
+        //         nbytes,
+        //         i,
+        //         size_of::<MemBlock<S>>(),
+        //         block,
+        //     )
+        //     .expect("index write fail in MemPool::new");
+        // }
+        // let len = Cell::new(len);
+        // let mem = Cell::new(mem);
+        // Self {
+        //     first_avail,
+        //     mem,
+        //     len,
+        // }
     }
 
     /// Size in bytes
@@ -317,14 +333,14 @@ impl<const S: usize> MemPool<S> {
     }
 
     pub fn size_bytes(&self) -> usize {
-        self.len() * size_of::<MemBlock<S>>()
+        self.len() * self.block_size()
     }
 
-    fn write_at<T>(&self, id: usize, v: T) -> anyhow::Result<()>
+    fn write_at<T>(&self, id: PoolHandle, v: T) -> anyhow::Result<()>
     where
         T: Byteable,
     {
-        ensure!(id < self.len());
+        ensure!(id.0 < self.len());
 
         let block = self.mut_view(id);
         block.bytes.try_write(v)?;
@@ -336,9 +352,9 @@ impl<const S: usize> MemPool<S> {
         T: Byteable,
     {
         let bytes = self.alloc_bytes(std::mem::size_of::<T>())?;
-        let mut typed = bytes.cast::<T>();
+        Ptr::bytes_write(&bytes, v);
 
-        let t = typed.inner_mut();
+        let typed = bytes.bytes_cast::<T>();
 
         Ok(typed)
     }
@@ -353,7 +369,7 @@ impl<const S: usize> MemPool<S> {
             }
         );
 
-        let next_id = if self.first_avail.get() > self.len() {
+        let next_id = if self.first_avail.get().0 > self.len() {
             bail!(AllocError::Full);
         } else {
             self.first_avail.get()
@@ -375,7 +391,7 @@ impl<const S: usize> MemPool<S> {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ptr<'alloc, const SIZE: usize, T: Byteable + ?Sized> {
-    id: usize,
+    id: PoolHandle,
     parent: &'alloc MemPool<SIZE>,
     _phantom: PhantomData<&'alloc T>,
 }
@@ -404,7 +420,14 @@ impl<'a, const S: usize, T> Ptr<'a, S, T>
 where
     T: Byteable,
 {
-    pub fn write(&self, v: T) {}
+    pub fn write(&self, v: T)
+    where
+        T: Byteable,
+    {
+        let view = self.parent.mut_view(self.id);
+        view.bytes.write(v);
+    }
+
     pub fn inner_ref(&self) -> &T {
         self.parent[self.id]
             .mem
@@ -414,12 +437,12 @@ where
 
     pub fn inner_mut(&mut self) -> &mut T {
         let v = self.parent.mut_view(self.id);
-        v.cast_mut::<T>().expect("Type too large!!!")
+        v.into_mut::<T>().expect("Type too large!!!")
     }
 }
 
 impl<'a, const S: usize> Ptr<'a, S, [u8]> {
-    pub const fn cast<T>(&self) -> Ptr<'a, S, T>
+    pub const fn bytes_cast<T>(&self) -> Ptr<'a, S, T>
     where
         T: Byteable + ?Sized,
     {
@@ -429,6 +452,14 @@ impl<'a, const S: usize> Ptr<'a, S, [u8]> {
             _phantom: PhantomData,
         }
     }
+
+    pub fn bytes_write<T>(&self, v: T)
+    where
+        T: Byteable,
+    {
+        let view = self.parent.mut_view(self.id);
+        view.bytes.write(v);
+    }
 }
 
 #[derive(Debug)]
@@ -436,6 +467,8 @@ pub(crate) struct MemBlockMut<'alloc, const SIZE: usize> {
     head: &'alloc mut MemHeader,
     bytes: &'alloc mut MemBytes<SIZE>,
 }
+
+unsafe impl<'a, const SIZE: usize> Byteable for MemBlockMut<'a, SIZE> {}
 
 impl<'a, const S: usize> MemBlockMut<'a, S> {
     pub fn new(mut ptr: NonNull<MemBlock<S>>) -> Self {
@@ -445,17 +478,42 @@ impl<'a, const S: usize> MemBlockMut<'a, S> {
         Self { head, bytes }
     }
 
-    pub fn cast_mut<T>(mut self) -> anyhow::Result<&'a mut T>
+    pub fn into_mut<T>(self) -> anyhow::Result<&'a mut T>
+    where
+        T: Byteable,
+    {
+        let t = unsafe { self.into_ptr()?.as_mut() };
+        Ok(t)
+    }
+
+    pub fn into_ptr<T>(mut self) -> anyhow::Result<NonNull<T>>
+    where
+        T: Byteable,
+    {
+        let ptr = self.try_as_ptr()?;
+        Ok(ptr)
+    }
+
+    pub fn as_ptr<T>(&mut self) -> NonNull<T>
+    where
+        T: Byteable,
+    {
+        self.try_as_ptr().expect(&format!(
+            "Size Mismatch when casting MemBlock to {}!!!",
+            std::any::type_name::<T>()
+        ))
+    }
+
+    pub fn try_as_ptr<T>(&mut self) -> anyhow::Result<NonNull<T>>
     where
         T: Byteable,
     {
         // Hack/Workaround? We are erasing lifetime right here since we have it enforced already
-        let t = unsafe {
+        unsafe {
             let tref = from_bytes_mut(&mut self.bytes)?;
-            let mut ptr = NonNull::new(tref).expect("Reference is null!");
-            ptr.as_mut()
-        };
-        Ok(t)
+            let ptr = NonNull::new(tref).expect("Reference is null!");
+            Ok(ptr)
+        }
     }
 }
 
